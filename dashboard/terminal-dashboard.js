@@ -73,7 +73,7 @@ function now() {
 // ── Data: Registered groups ───────────────────────────────────────────────────
 function loadGroups() {
   try {
-    const Database = require('/home/antonlobanovskiy/dev/NanoClaw/dashboard/api/node_modules/better-sqlite3');
+    const Database = require(path.join(BASE, 'dashboard/api/node_modules/better-sqlite3'));
     const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
     state.groups = db.prepare('SELECT name, folder FROM registered_groups').all();
     db.close();
@@ -125,6 +125,7 @@ function findLatestJsonl(groupName) {
         const fp = path.join(dirPath, f);
         try {
           const st = fs.statSync(fp);
+          if (!st.isFile()) continue;
           if (!latest || st.mtimeMs > latest.mtime) {
             latest = { path: fp, mtime: st.mtimeMs };
           }
@@ -139,8 +140,13 @@ function findLatestJsonl(groupName) {
 
 function getLastToolCall(jsonlPath) {
   try {
-    const content = fs.readFileSync(jsonlPath, 'utf8');
-    const lines = content.trim().split('\n').reverse();
+    const st = fs.statSync(jsonlPath);
+    const readSize = Math.min(16384, st.size);
+    const buf = Buffer.alloc(readSize);
+    const fd = fs.openSync(jsonlPath, 'r');
+    fs.readSync(fd, buf, 0, readSize, st.size - readSize);
+    fs.closeSync(fd);
+    const lines = buf.toString('utf8').split('\n').reverse();
     for (const line of lines) {
       try {
         const obj = JSON.parse(line);
