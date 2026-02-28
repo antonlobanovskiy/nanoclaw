@@ -503,5 +503,56 @@ function render() {
   process.stdout.write(`${ESC}H` + out.join('\n'));
 }
 
+// ── Keyboard input ────────────────────────────────────────────────────────────
+if (process.stdin.isTTY) {
+  readline.emitKeypressEvents(process.stdin);
+  process.stdin.setRawMode(true);
+  process.stdin.on('keypress', (str, key) => {
+    if (!key) return;
+
+    if (key.name === 'q' || (key.ctrl && key.name === 'c')) {
+      cleanup();
+    }
+
+    if (key.name === 'tab') {
+      const names = state.agents.map(a => a.name);
+      if (names.length === 0) return;
+      const idx = names.indexOf(state.selectedAgent);
+      const next = names[(idx + 1) % names.length];
+      state.selectedAgent = next;
+      _transcriptFile = null;
+      state.transcript = [];
+      state.transcriptScroll = 0;
+      watchTranscript(next);
+      render();
+    }
+
+    if (key.name === 'up') {
+      state.transcriptScroll = Math.min(
+        state.transcriptScroll + 3,
+        Math.max(0, state.transcript.length - 10)
+      );
+      render();
+    }
+
+    if (key.name === 'down') {
+      state.transcriptScroll = Math.max(0, state.transcriptScroll - 3);
+      render();
+    }
+
+    if (key.name === 'g') {
+      state.transcriptScroll = 0;
+      render();
+    }
+
+    if (key.name === 'r') {
+      exec('systemctl --user restart nanoclaw', () => {
+        checkServiceStatus();
+        render();
+      });
+    }
+  });
+}
+
 setInterval(render, 2_000);
 render();
