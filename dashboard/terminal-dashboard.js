@@ -187,6 +187,39 @@ function scanAgents() {
   }
 }
 
+// ── Data: Service log watcher ─────────────────────────────────────────────────
+let _logOffset = 0;
+
+function initLogWatcher() {
+  // Seed with last 50 lines
+  try {
+    const content = fs.readFileSync(LOG_PATH, 'utf8');
+    const lines = content.split('\n').filter(Boolean);
+    state.serviceLog = lines.slice(-50);
+    _logOffset = Buffer.byteLength(content, 'utf8');
+  } catch { }
+
+  fs.watchFile(LOG_PATH, { interval: 500 }, () => {
+    try {
+      const fd = fs.openSync(LOG_PATH, 'r');
+      const stat = fs.fstatSync(fd);
+      if (stat.size < _logOffset) _logOffset = 0; // log rotated
+
+      const toRead = stat.size - _logOffset;
+      if (toRead <= 0) { fs.closeSync(fd); return; }
+
+      const buf = Buffer.alloc(toRead);
+      fs.readSync(fd, buf, 0, toRead, _logOffset);
+      fs.closeSync(fd);
+      _logOffset += toRead;
+
+      const newLines = buf.toString('utf8').split('\n').filter(Boolean);
+      state.serviceLog.push(...newLines);
+      if (state.serviceLog.length > 200) state.serviceLog = state.serviceLog.slice(-200);
+    } catch { }
+  });
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 process.stdout.write(HIDE_CURSOR + CLEAR);
 
@@ -199,6 +232,7 @@ process.on('SIGTERM', cleanup);
 
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 loadGroups();
+initLogWatcher();
 checkServiceStatus();
 readSystemStats();
 scanAgents();
