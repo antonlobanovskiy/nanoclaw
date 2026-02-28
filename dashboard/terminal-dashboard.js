@@ -202,20 +202,23 @@ function initLogWatcher() {
   fs.watchFile(LOG_PATH, { interval: 500 }, () => {
     try {
       const fd = fs.openSync(LOG_PATH, 'r');
-      const stat = fs.fstatSync(fd);
-      if (stat.size < _logOffset) _logOffset = 0; // log rotated
+      try {
+        const stat = fs.fstatSync(fd);
+        if (stat.size < _logOffset) _logOffset = 0; // log rotated
 
-      const toRead = stat.size - _logOffset;
-      if (toRead <= 0) { fs.closeSync(fd); return; }
+        const toRead = stat.size - _logOffset;
+        if (toRead > 0) {
+          const buf = Buffer.alloc(toRead);
+          fs.readSync(fd, buf, 0, toRead, _logOffset);
+          _logOffset += toRead;
 
-      const buf = Buffer.alloc(toRead);
-      fs.readSync(fd, buf, 0, toRead, _logOffset);
-      fs.closeSync(fd);
-      _logOffset += toRead;
-
-      const newLines = buf.toString('utf8').split('\n').filter(Boolean);
-      state.serviceLog.push(...newLines);
-      if (state.serviceLog.length > 200) state.serviceLog = state.serviceLog.slice(-200);
+          const newLines = buf.toString('utf8').split('\n').filter(Boolean);
+          state.serviceLog.push(...newLines);
+          if (state.serviceLog.length > 200) state.serviceLog = state.serviceLog.slice(-200);
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
     } catch { }
   });
 }
