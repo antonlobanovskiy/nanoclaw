@@ -37,7 +37,7 @@ const YELLOW = `${ESC}33m`;
 const CYAN = `${ESC}36m`;
 const WHITE = `${ESC}37m`;
 const GRAY = `${ESC}90m`;
-const ORANGE = `${ESC}33m`;
+const ORANGE = `${ESC}38;5;208m`;  // 256-color orange
 const B_GREEN = `${ESC}92m`;
 
 // ── Box drawing ───────────────────────────────────────────────────────────────
@@ -73,7 +73,7 @@ function now() {
 // ── Data: Registered groups ───────────────────────────────────────────────────
 function loadGroups() {
   try {
-    const Database = require(path.join(BASE, 'dashboard/api/node_modules/better-sqlite3'));
+    const Database = require(path.join(BASE, 'node_modules/better-sqlite3'));
     const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
     state.groups = db.prepare('SELECT name, folder FROM registered_groups').all();
     db.close();
@@ -320,7 +320,7 @@ function watchTranscript(groupName) {
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
-process.stdout.write(HIDE_CURSOR + CLEAR);
+process.stdout.write(HIDE_CURSOR + '\x1b[?1049h');
 
 function cleanup() {
   process.stdout.write(SHOW_CURSOR + `${ESC}?1049l`);
@@ -528,10 +528,10 @@ if (process.stdin.isTTY) {
     }
 
     if (key.name === 'up') {
-      state.transcriptScroll = Math.min(
-        state.transcriptScroll + 3,
-        Math.max(0, state.transcript.length - 10)
-      );
+      // Estimate rendered line count: each event averages ~4 lines
+      const { rows } = termSize();
+      const maxScroll = Math.max(0, state.transcript.length * 4 - rows);
+      state.transcriptScroll = Math.min(state.transcriptScroll + 3, maxScroll);
       render();
     }
 
