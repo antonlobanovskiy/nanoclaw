@@ -411,7 +411,10 @@ function renderTranscript(width, height) {
 }
 
 function renderServiceLog(width, height) {
-  const lines = state.serviceLog.slice(-height).map(l => colorizeLog(l));
+  const lines = state.serviceLog.slice(-height).map(l => {
+    const truncated = l.slice(0, width);  // truncate to visible width before colorizing
+    return colorizeLog(truncated);
+  });
   while (lines.length < height) lines.push('');
   return lines;
 }
