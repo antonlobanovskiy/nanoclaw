@@ -185,6 +185,7 @@ function scanAgents() {
   } else if (!state.selectedAgent && state.agents.length > 0) {
     state.selectedAgent = state.agents[0].name;
   }
+  if (state.selectedAgent) watchTranscript(state.selectedAgent);
 }
 
 // ── Data: Service log watcher ─────────────────────────────────────────────────
@@ -223,6 +224,101 @@ function initLogWatcher() {
   });
 }
 
+// ── Data: Transcript watcher ──────────────────────────────────────────────────
+let _transcriptFile = null;
+let _transcriptOffset = 0;
+
+function parseJsonlEvent(obj) {
+  const events = [];
+  if (!obj || typeof obj !== 'object') return events;
+
+  if (obj.type === 'user') {
+    const raw = typeof obj.message?.content === 'string'
+      ? obj.message.content
+      : JSON.stringify(obj.message?.content ?? '');
+    // Strip XML wrapper if present: <messages><message ...>TEXT</message></messages>
+    const text = raw.replace(/<messages>[\s\S]*?<message[^>]*>([\s\S]*?)<\/message>[\s\S]*?<\/messages>/g, '$1').trim();
+    if (text) events.push({ kind: 'user', text });
+  }
+
+  if (obj.type === 'assistant') {
+    const content = obj.message?.content ?? [];
+    for (const c of content) {
+      if (c.type === 'text' && c.text?.trim()) {
+        events.push({ kind: 'assistant', text: c.text.trim() });
+      }
+      if (c.type === 'tool_use') {
+        const inputLines = typeof c.input === 'object'
+          ? Object.entries(c.input).map(([k, v]) => `  ${k}: ${String(v).slice(0, 200)}`)
+          : [`  ${String(c.input).slice(0, 200)}`];
+        events.push({ kind: 'tool_use', name: c.name, inputLines });
+      }
+    }
+  }
+
+  if (obj.type === 'tool') {
+    const parts = obj.content ?? [];
+    for (const p of parts) {
+      const lines = (p.content ?? [])
+        .filter(c => c.type === 'text')
+        .flatMap(c => c.text.split('\n'));
+      const truncated = lines.length > 20
+        ? [...lines.slice(0, 20), `  … ${lines.length - 20} more lines`]
+        : lines;
+      events.push({ kind: 'tool_result', lines: truncated.map(l => `  ${l}`) });
+    }
+  }
+
+  return events;
+}
+
+function loadTranscript(filePath) {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    _transcriptOffset = Buffer.byteLength(content, 'utf8');
+    state.transcript = [];
+    for (const line of content.split('\n').filter(Boolean)) {
+      try { state.transcript.push(...parseJsonlEvent(JSON.parse(line))); } catch { }
+    }
+    if (state.transcript.length > 500) state.transcript = state.transcript.slice(-500);
+    state.transcriptScroll = 0;
+  } catch { }
+}
+
+function watchTranscript(groupName) {
+  const latest = findLatestJsonl(groupName);
+  if (!latest) return;
+
+  if (latest.path !== _transcriptFile) {
+    if (_transcriptFile) fs.unwatchFile(_transcriptFile);
+    _transcriptFile = latest.path;
+    _transcriptOffset = 0;
+    state.transcript.push({ kind: 'divider', text: '── new session ──' });
+    loadTranscript(_transcriptFile);
+
+    fs.watchFile(_transcriptFile, { interval: 500 }, () => {
+      try {
+        const fd = fs.openSync(_transcriptFile, 'r');
+        try {
+          const stat = fs.fstatSync(fd);
+          const toRead = stat.size - _transcriptOffset;
+          if (toRead > 0) {
+            const buf = Buffer.alloc(toRead);
+            fs.readSync(fd, buf, 0, toRead, _transcriptOffset);
+            _transcriptOffset += toRead;
+            for (const line of buf.toString('utf8').split('\n').filter(Boolean)) {
+              try { state.transcript.push(...parseJsonlEvent(JSON.parse(line))); } catch { }
+            }
+            if (state.transcript.length > 500) state.transcript = state.transcript.slice(-500);
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch { }
+    });
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 process.stdout.write(HIDE_CURSOR + CLEAR);
 
@@ -250,5 +346,7 @@ setInterval(() => {
   process.stdout.write(CLEAR);
   process.stdout.write(JSON.stringify(state.agents, null, 2) + '\n');
   process.stdout.write(`cpu: ${state.cpu}%  mem: ${state.mem}%  service: ${state.serviceStatus}\n`);
-  process.stdout.write(state.serviceLog.slice(-5).join('\n') + '\n');
+  process.stdout.write(`transcript events: ${state.transcript.length}  selected: ${state.selectedAgent}\n`);
+  state.transcript.slice(-3).forEach(ev => process.stdout.write(JSON.stringify(ev) + '\n'));
+  process.stdout.write(state.serviceLog.slice(-3).join('\n') + '\n');
 }, 3_000);
