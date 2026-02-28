@@ -293,8 +293,8 @@ function watchTranscript(groupName) {
     if (_transcriptFile) fs.unwatchFile(_transcriptFile);
     _transcriptFile = latest.path;
     _transcriptOffset = 0;
-    state.transcript.push({ kind: 'divider', text: '── new session ──' });
     loadTranscript(_transcriptFile);
+    state.transcript.unshift({ kind: 'divider', text: '── new session ──' });
 
     fs.watchFile(_transcriptFile, { interval: 500 }, () => {
       try {
