@@ -554,5 +554,7 @@ if (process.stdin.isTTY) {
   });
 }
 
+process.on('SIGWINCH', () => render());
+
 setInterval(render, 2_000);
 render();
