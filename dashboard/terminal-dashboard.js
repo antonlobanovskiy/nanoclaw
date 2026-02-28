@@ -341,12 +341,164 @@ setInterval(checkServiceStatus, 5_000);
 setInterval(readSystemStats, 2_000);
 setInterval(scanAgents, 2_000);
 
-// Debug: dump state every 3s
-setInterval(() => {
-  process.stdout.write(CLEAR);
-  process.stdout.write(JSON.stringify(state.agents, null, 2) + '\n');
-  process.stdout.write(`cpu: ${state.cpu}%  mem: ${state.mem}%  service: ${state.serviceStatus}\n`);
-  process.stdout.write(`transcript events: ${state.transcript.length}  selected: ${state.selectedAgent}\n`);
-  state.transcript.slice(-3).forEach(ev => process.stdout.write(JSON.stringify(ev) + '\n'));
-  process.stdout.write(state.serviceLog.slice(-3).join('\n') + '\n');
-}, 3_000);
+// ── Render helpers ────────────────────────────────────────────────────────────
+const ANSI_RE = /\x1b\[[^m]*m/g;
+function stripAnsi(str) { return str.replace(ANSI_RE, ''); }
+function stripAnsiLen(str) { return stripAnsi(str).length; }
+
+function termSize() {
+  return { cols: process.stdout.columns || 120, rows: process.stdout.rows || 40 };
+}
+
+function colorizeLog(line) {
+  if (/\bERROR\b|\bERR\b/.test(line)) return RED + line + RESET;
+  if (/\bWARN\b|\bWARNING\b/.test(line)) return ORANGE + line + RESET;
+  return DIM + line + RESET;
+}
+
+function renderBar(value, width, color) {
+  const filled = Math.round(Math.max(0, Math.min(100, value)) / 100 * width);
+  return color + '█'.repeat(filled) + RESET + DIM + '░'.repeat(width - filled) + RESET;
+}
+
+function formatAge(mtime) {
+  const sec = Math.floor((Date.now() - mtime) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  return `${Math.floor(sec / 3600)}h ago`;
+}
+
+function renderTranscript(width, height) {
+  const lines = [];
+  for (const ev of state.transcript) {
+    switch (ev.kind) {
+      case 'divider':
+        lines.push(GRAY + ev.text.slice(0, width - 1).padEnd(width - 1) + RESET);
+        break;
+      case 'user':
+        lines.push(CYAN + BOLD + '[user]' + RESET);
+        for (const l of ev.text.split('\n').slice(0, 10)) {
+          lines.push('  ' + l.slice(0, width - 3));
+        }
+        lines.push('');
+        break;
+      case 'assistant':
+        lines.push(GREEN + BOLD + '[assistant]' + RESET);
+        for (const l of ev.text.split('\n').slice(0, 15)) {
+          lines.push('  ' + l.slice(0, width - 3));
+        }
+        lines.push('');
+        break;
+      case 'tool_use':
+        lines.push(YELLOW + BOLD + `[tool_use] ${ev.name}` + RESET);
+        for (const l of ev.inputLines ?? []) {
+          lines.push(l.slice(0, width - 1));
+        }
+        lines.push('');
+        break;
+      case 'tool_result':
+        lines.push(DIM + '[tool_result]' + RESET);
+        for (const l of ev.lines ?? []) {
+          lines.push(DIM + l.slice(0, width - 1) + RESET);
+        }
+        lines.push('');
+        break;
+    }
+  }
+  const total = lines.length;
+  const start = Math.max(0, total - height - state.transcriptScroll);
+  return lines.slice(start, start + height);
+}
+
+function renderServiceLog(width, height) {
+  const lines = state.serviceLog.slice(-height).map(l => colorizeLog(l));
+  while (lines.length < height) lines.push('');
+  return lines;
+}
+
+// ── Renderer ──────────────────────────────────────────────────────────────────
+function render() {
+  const { cols, rows } = termSize();
+  const out = [];
+
+  // ── Header ───────────────────────────────────────────────────────────────────
+  const statusColor = state.serviceStatus === 'active' ? B_GREEN : RED;
+  const statusDot = state.serviceStatus === 'active' ? '●' : '○';
+  const agentCount = state.agents.filter(a => a.active).length;
+  const headerContent = ` NANOCLAW  ${statusColor}${statusDot} ${state.serviceStatus}${RESET}` +
+    `  cpu ${renderBar(state.cpu, 8, CYAN)} ${state.cpu}%` +
+    `  mem ${renderBar(state.mem, 8, YELLOW)} ${state.mem}%` +
+    `  agents: ${agentCount}  ${BOLD}${now()}${RESET}`;
+  const headerPad = Math.max(0, cols - 2 - stripAnsiLen(headerContent));
+  out.push(BOX.TL + BOX.H.repeat(cols - 2) + BOX.TR);
+  out.push(BOX.V + headerContent + ' '.repeat(headerPad) + BOX.V);
+
+  // ── Agent panel ───────────────────────────────────────────────────────────────
+  out.push(BOX.LJ + BOX.H.repeat(cols - 2) + BOX.RJ);
+  const agentsLabel = ' AGENTS';
+  out.push(BOX.V + BOLD + agentsLabel + RESET + ' '.repeat(cols - 2 - agentsLabel.length) + BOX.V);
+
+  if (state.agents.length === 0) {
+    const msg = '  no registered groups';
+    out.push(BOX.V + GRAY + msg + RESET + ' '.repeat(cols - 2 - msg.length) + BOX.V);
+  } else {
+    for (const agent of state.agents) {
+      const dot = agent.active ? B_GREEN + '●' + RESET : GRAY + '○' + RESET;
+      const name = agent.name.slice(0, 12).padEnd(12);
+      const tool = agent.active && agent.currentTool
+        ? YELLOW + '► ' + agent.currentTool.slice(0, 50) + RESET
+        : GRAY + 'idle' + RESET;
+      const age = agent.lastSeen
+        ? (agent.active ? GREEN + 'active' + RESET : GRAY + formatAge(agent.lastSeen) + RESET)
+        : GRAY + 'never' + RESET;
+      const visLen = 1 + 1 + 1 + name.length + 1 + stripAnsiLen(tool) + 1 + stripAnsiLen(age) + 1;
+      const pad = Math.max(0, cols - 2 - visLen);
+      out.push(`${BOX.V} ${dot} ${name} ${tool}${' '.repeat(pad)} ${age} ${BOX.V}`);
+    }
+  }
+
+  // ── Split pane ────────────────────────────────────────────────────────────────
+  const transcriptCols = Math.floor((cols - 3) * 0.6);
+  const logCols = cols - 3 - transcriptCols;
+
+  out.push(BOX.lj + BOX.h.repeat(transcriptCols) + BOX.tj + BOX.h.repeat(logCols) + BOX.rj);
+
+  const tHeader = ` TRANSCRIPT  [${state.selectedAgent ?? 'none'}]`;
+  const lHeader = ' SERVICE LOG';
+  const tHeaderPad = Math.max(0, transcriptCols - tHeader.length);
+  const lHeaderPad = Math.max(0, logCols - lHeader.length);
+  out.push(
+    BOX.V + BOLD + tHeader + RESET + ' '.repeat(tHeaderPad) +
+    BOX.v +
+    BOLD + lHeader + RESET + ' '.repeat(lHeaderPad) +
+    BOX.V
+  );
+
+  const legendRows = 1;
+  const fixedRows = out.length + legendRows + 2; // +2 for legend divider + bottom border
+  const paneRows = Math.max(1, rows - fixedRows);
+
+  const transcriptLines = renderTranscript(transcriptCols, paneRows);
+  const logLines = renderServiceLog(logCols, paneRows);
+
+  for (let i = 0; i < paneRows; i++) {
+    const tRaw = transcriptLines[i] ?? '';
+    const lRaw = logLines[i] ?? '';
+    // Pad to exact visible width (ignoring ANSI codes)
+    const tPad = Math.max(0, transcriptCols - stripAnsiLen(tRaw));
+    const lPad = Math.max(0, logCols - stripAnsiLen(lRaw));
+    out.push(BOX.V + tRaw + ' '.repeat(tPad) + BOX.v + lRaw + ' '.repeat(lPad) + BOX.V);
+  }
+
+  // ── Legend ────────────────────────────────────────────────────────────────────
+  out.push(BOX.lj + BOX.h.repeat(transcriptCols) + BOX.bj + BOX.h.repeat(logCols) + BOX.rj);
+  const legend = `  ${DIM}[Tab]${RESET} cycle agents  ${DIM}[↑↓]${RESET} scroll  ${DIM}[g]${RESET} follow  ${DIM}[r]${RESET} restart service  ${DIM}[q]${RESET} quit`;
+  const legendPad = Math.max(0, cols - 2 - stripAnsiLen(legend));
+  out.push(BOX.V + legend + ' '.repeat(legendPad) + BOX.V);
+  out.push(BOX.BL + BOX.H.repeat(cols - 2) + BOX.BR);
+
+  process.stdout.write(`${ESC}H` + out.join('\n'));
+}
+
+setInterval(render, 2_000);
+render();
