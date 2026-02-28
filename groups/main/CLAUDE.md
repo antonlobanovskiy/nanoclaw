@@ -34,6 +34,16 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 When working as a sub-agent or teammate, only use `send_message` if instructed to by the main agent.
 
+### Model selection for subagents
+
+When spawning subagents via the `Task` tool, choose the model based on complexity:
+
+- `model: "haiku"` — simple, fast tasks: formatting, summarizing short text, quick lookups, drafting short messages, unit conversions, yes/no checks
+- `model: "sonnet"` — default for most tasks: research, writing, coding, analysis, multi-step reasoning
+- `model: "opus"` — hard problems only: complex multi-step research, architecture decisions, deep reasoning, tasks where accuracy is critical and you expect many tool calls
+
+Use Haiku liberally for menial subtasks — it's much cheaper and faster.
+
 ## Memory
 
 The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
