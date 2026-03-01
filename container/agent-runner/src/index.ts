@@ -130,7 +130,10 @@ async function classifyModel(
 ): Promise<'claude-opus-4-6' | 'claude-sonnet-4-6'> {
   try {
     const truncated = prompt.slice(0, 2000);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
     const response = await fetch('https://api.anthropic.com/v1/messages', {
+      signal: controller.signal,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -148,6 +151,8 @@ async function classifyModel(
         ],
       }),
     });
+
+    clearTimeout(timeout);
 
     if (!response.ok) {
       log(`Classifier HTTP error: ${response.status}`);
