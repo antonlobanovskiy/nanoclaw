@@ -124,55 +124,16 @@ function log(message: string): void {
  * Call Haiku to classify whether a prompt needs Opus or Sonnet.
  * Returns 'claude-opus-4-6' or 'claude-sonnet-4-6'. Falls back to sonnet on error.
  */
-async function classifyModel(
-  prompt: string,
-  apiKey: string,
-): Promise<'claude-opus-4-6' | 'claude-sonnet-4-6'> {
-  try {
-    const truncated = prompt.slice(0, 2000);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      signal: controller.signal,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 10,
-        messages: [
-          {
-            role: 'user',
-            content: `Classify this prompt's complexity. Reply with exactly one word: "opus" if it requires deep reasoning, complex analysis, or creative work; "sonnet" if it's straightforward.\n\nPrompt: ${truncated}`,
-          },
-        ],
-      }),
-    });
+const OPUS_KEYWORDS = /\b(plan|architect|design|debug|refactor|analyze|redesign|implement|overhaul|migrate|build out|create a detailed|write a comprehensive|deep dive|from scratch|step[- ]by[- ]step|multi[- ]step|break.*down|think through)\b/i;
+const MIN_LENGTH_FOR_OPUS = 300;
 
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      log(`Classifier HTTP error: ${response.status}`);
-      return 'claude-sonnet-4-6';
-    }
-
-    const data = await response.json() as {
-      content?: Array<{ type: string; text?: string }>;
-    };
-    const text = data.content?.[0]?.text?.trim().toLowerCase() || '';
-    if (text.includes('opus')) {
-      log('Classifier selected: opus');
-      return 'claude-opus-4-6';
-    }
-    log('Classifier selected: sonnet');
-    return 'claude-sonnet-4-6';
-  } catch (err) {
-    log(`Classifier error: ${err instanceof Error ? err.message : String(err)}`);
-    return 'claude-sonnet-4-6';
+function classifyModel(prompt: string): 'claude-opus-4-6' | 'claude-sonnet-4-6' {
+  if (prompt.length >= MIN_LENGTH_FOR_OPUS && OPUS_KEYWORDS.test(prompt)) {
+    log('Classifier selected: opus (keyword + length match)');
+    return 'claude-opus-4-6';
   }
+  log('Classifier selected: sonnet');
+  return 'claude-sonnet-4-6';
 }
 
 /**
@@ -617,9 +578,8 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
-  // Resolve model: user override > config > classifier
-  const apiKey = sdkEnv.ANTHROPIC_API_KEY || sdkEnv.CLAUDE_CODE_OAUTH_TOKEN || '';
-  const resolveModel = async (currentPrompt: string): Promise<{ model: string; cleanPrompt: string }> => {
+  // Resolve model: user override > config > heuristic classifier
+  const resolveModel = (currentPrompt: string): { model: string; cleanPrompt: string } => {
     const override = parseModelOverride(currentPrompt);
     if (override.model) {
       log(`Model override: ${override.model}`);
@@ -629,11 +589,11 @@ async function main(): Promise<void> {
       log(`Config model: ${containerInput.model}`);
       return { model: containerInput.model, cleanPrompt: currentPrompt };
     }
-    const classified = await classifyModel(currentPrompt, apiKey);
+    const classified = classifyModel(currentPrompt);
     return { model: classified, cleanPrompt: currentPrompt };
   };
 
-  const { model: resolvedModel, cleanPrompt } = await resolveModel(prompt);
+  const { model: resolvedModel, cleanPrompt } = resolveModel(prompt);
   prompt = cleanPrompt;
   log(`Resolved model: ${resolvedModel}`);
   try { fs.writeFileSync('/workspace/ipc/model.txt', resolvedModel); } catch { /* ignore */ }
@@ -676,7 +636,7 @@ async function main(): Promise<void> {
       log(`Got new message (${nextMessage.length} chars), starting new query`);
 
       // Re-resolve model for follow-up messages
-      const { model: newModel, cleanPrompt: newCleanPrompt } = await resolveModel(nextMessage);
+      const { model: newModel, cleanPrompt: newCleanPrompt } = resolveModel(nextMessage);
       prompt = newCleanPrompt;
       currentModel = newModel;
       log(`Re-resolved model: ${currentModel}`);

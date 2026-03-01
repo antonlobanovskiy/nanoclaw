@@ -98,7 +98,10 @@ function render() {
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 30;
 
-  const header = `${BOLD} TRANSCRIPT${RESET}  ${DIM}[${selectedAgent ?? 'none'}]${RESET}`;
+  const modelTag = currentModel
+    ? currentModel.replace('claude-', '').replace('-4-6', '')
+    : null;
+  const header = `${BOLD} TRANSCRIPT${RESET}  ${DIM}[${selectedAgent ?? 'none'}]${RESET}${modelTag ? `  ${GREEN}${modelTag}${RESET}` : ''}`;
   const allLines = [];
 
   for (const ev of transcript) {
@@ -112,16 +115,12 @@ function render() {
           allLines.push(`  ${l.slice(0, cols - 3)}`);
         allLines.push('');
         break;
-      case 'assistant': {
-        const modelTag = currentModel
-          ? currentModel.replace('claude-', '').replace('-4-6', '')
-          : null;
-        allLines.push(`${GREEN}${BOLD}[assistant${modelTag ? ` · ${modelTag}` : ''}]${RESET}`);
+      case 'assistant':
+        allLines.push(`${GREEN}${BOLD}[assistant]${RESET}`);
         for (const l of ev.text.split('\n').slice(0, 15))
           allLines.push(`  ${l.slice(0, cols - 3)}`);
         allLines.push('');
         break;
-      }
       case 'tool_use':
         allLines.push(`${YELLOW}${BOLD}[tool_use] ${ev.name}${RESET}`);
         for (const l of ev.inputLines ?? [])
