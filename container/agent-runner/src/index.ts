@@ -121,19 +121,95 @@ function log(message: string): void {
 }
 
 /**
- * Call Haiku to classify whether a prompt needs Opus or Sonnet.
- * Returns 'claude-opus-4-6' or 'claude-sonnet-4-6'. Falls back to sonnet on error.
+ * Multi-signal scoring classifier for model routing.
+ * Returns 'claude-opus-4-6' or 'claude-sonnet-4-6' based on weighted signals.
  */
-const OPUS_KEYWORDS = /\b(plan|architect|design|debug|refactor|analyze|redesign|implement|overhaul|migrate|build out|create a detailed|write a comprehensive|deep dive|from scratch|step[- ]by[- ]step|multi[- ]step|break.*down|think through)\b/i;
-const MIN_LENGTH_FOR_OPUS = 300;
+const OPUS_KEYWORDS = /\b(plan|architect|design|debug|refactor|analyze|redesign|implement|overhaul|migrate|build out|create a detailed|write a comprehensive|deep dive|from scratch|step[- ]by[- ]step|multi[- ]step|break.*down|think through)\b/gi;
 
-function classifyModel(prompt: string): 'claude-opus-4-6' | 'claude-sonnet-4-6' {
-  if (prompt.length >= MIN_LENGTH_FOR_OPUS && OPUS_KEYWORDS.test(prompt)) {
-    log('Classifier selected: opus (keyword + length match)');
-    return 'claude-opus-4-6';
+interface ClassifierSignals {
+  prompt: string;
+  isScheduledTask?: boolean;
+  hasSession: boolean;
+  groupFolder?: string;
+}
+
+// Groups where most work benefits from Opus — gets a flat bias added to the score.
+const OPUS_BIASED_GROUPS: Record<string, number> = {
+  grocery: 0.25,
+};
+
+const OPUS_THRESHOLD = 0.55;
+
+function classifyModel(signals: ClassifierSignals): 'claude-opus-4-6' | 'claude-sonnet-4-6' {
+  const { prompt, isScheduledTask, hasSession } = signals;
+  let score = 0;
+  const details: string[] = [];
+
+  // Length signal: ramp 0→1 between 200-800 chars (weight 0.15)
+  const lengthScore = Math.min(Math.max((prompt.length - 200) / 600, 0), 1) * 0.15;
+  score += lengthScore;
+  if (lengthScore > 0) details.push(`length=${lengthScore.toFixed(2)}`);
+
+  // Keyword signal: min(matchCount / 3, 1) * 0.25
+  const matches = prompt.match(OPUS_KEYWORDS);
+  const keywordScore = Math.min((matches?.length || 0) / 3, 1) * 0.25;
+  score += keywordScore;
+  if (keywordScore > 0) details.push(`keywords=${keywordScore.toFixed(2)}(${matches?.length})`);
+
+  // Structure signal: bullets, numbered lists, 3+ paragraphs, code blocks (0.25 each * 0.15)
+  let structureHits = 0;
+  if (/^[\s]*[-*•]\s/m.test(prompt)) structureHits++;
+  if (/^\s*\d+[.)]\s/m.test(prompt)) structureHits++;
+  if ((prompt.split(/\n\s*\n/).length) >= 3) structureHits++;
+  if (/```/.test(prompt)) structureHits++;
+  const structureScore = (structureHits * 0.25) * 0.15;
+  score += structureScore;
+  if (structureScore > 0) details.push(`structure=${structureScore.toFixed(2)}(${structureHits})`);
+
+  // Question density signal: high ? density pushes toward sonnet (weight -0.10)
+  const questionMarks = (prompt.match(/\?/g) || []).length;
+  const questionDensity = questionMarks / Math.max(prompt.length, 1);
+  if (questionDensity > 0.01) {
+    score -= 0.10;
+    details.push(`questions=-0.10`);
   }
-  log('Classifier selected: sonnet');
-  return 'claude-sonnet-4-6';
+
+  // First message signal: no session = kickoff, slight opus bias (weight 0.10)
+  if (!hasSession) {
+    score += 0.10;
+    details.push(`first-msg=0.10`);
+  }
+
+  // Scheduled task signal: flat bonus (weight 0.15)
+  if (isScheduledTask) {
+    score += 0.15;
+    details.push(`scheduled=0.15`);
+  }
+
+  // Code blocks signal: triple-backtick presence (weight 0.10)
+  if (/```/.test(prompt)) {
+    score += 0.10;
+    details.push(`code=0.10`);
+  }
+
+  // Image attachment signal: vision tasks benefit from stronger reasoning (weight 0.35)
+  const imageCount = (prompt.match(/\[Attached image/g) || []).length;
+  if (imageCount > 0) {
+    score += 0.35;
+    details.push(`images=0.35(${imageCount})`);
+  }
+
+  // Group bias: some groups default heavily toward Opus
+  const groupBias = OPUS_BIASED_GROUPS[signals.groupFolder || ''] || 0;
+  if (groupBias > 0) {
+    score += groupBias;
+    details.push(`group-bias=${groupBias.toFixed(2)}(${signals.groupFolder})`);
+  }
+
+  score = Math.min(score, 1.0);
+  const model = score >= OPUS_THRESHOLD ? 'claude-opus-4-6' : 'claude-sonnet-4-6';
+  log(`Classifier: ${model === 'claude-opus-4-6' ? 'opus' : 'sonnet'} (score=${score.toFixed(2)}, threshold=${OPUS_THRESHOLD}, ${details.join(', ')})`);
+  return model;
 }
 
 /**
@@ -141,18 +217,18 @@ function classifyModel(prompt: string): 'claude-opus-4-6' | 'claude-sonnet-4-6' 
  * Returns the resolved model and the prompt with the tag stripped.
  */
 function parseModelOverride(prompt: string): { model: string | null; cleanPrompt: string } {
-  const opusMatch = prompt.match(/\b@opus\b/i);
+  const opusMatch = prompt.match(/(?:^|\s)@opus(?:\s|$)/i);
   if (opusMatch) {
     return {
       model: 'claude-opus-4-6',
-      cleanPrompt: prompt.replace(/\s*\b@opus\b\s*/i, ' ').trim(),
+      cleanPrompt: prompt.replace(/(?:^|\s)@opus(?:\s|$)/i, ' ').trim(),
     };
   }
-  const sonnetMatch = prompt.match(/\b@sonnet\b/i);
+  const sonnetMatch = prompt.match(/(?:^|\s)@sonnet(?:\s|$)/i);
   if (sonnetMatch) {
     return {
       model: 'claude-sonnet-4-6',
-      cleanPrompt: prompt.replace(/\s*\b@sonnet\b\s*/i, ' ').trim(),
+      cleanPrompt: prompt.replace(/(?:^|\s)@sonnet(?:\s|$)/i, ' ').trim(),
     };
   }
   return { model: null, cleanPrompt: prompt };
@@ -367,6 +443,16 @@ function drainIpcInput(): string[] {
 }
 
 /**
+ * Stash a message back into IPC input so it's picked up on the next drain.
+ */
+function stashIpcMessage(text: string): void {
+  fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
+  const filename = `stash_${Date.now()}.json`;
+  fs.writeFileSync(path.join(IPC_INPUT_DIR, filename), JSON.stringify({ type: 'message', text }));
+  log(`Stashed IPC message for next turn (${filename})`);
+}
+
+/**
  * Wait for a new IPC message or _close sentinel.
  * Returns the messages as a single string, or null if _close.
  */
@@ -420,6 +506,20 @@ async function runQuery(
     }
     const messages = drainIpcInput();
     for (const text of messages) {
+      // Check if this message needs a model upgrade
+      const neededModel = classifyModel({
+        prompt: text,
+        isScheduledTask: containerInput.isScheduledTask,
+        hasSession: true,
+        groupFolder: containerInput.groupFolder,
+      });
+      if (neededModel === 'claude-opus-4-6' && resolvedModel !== 'claude-opus-4-6') {
+        log(`IPC message needs opus but running sonnet — ending stream for model upgrade`);
+        stashIpcMessage(text);
+        stream.end();
+        ipcPolling = false;
+        return;
+      }
       log(`Piping IPC message into active query (${text.length} chars)`);
       stream.push(text);
     }
@@ -589,7 +689,12 @@ async function main(): Promise<void> {
       log(`Config model: ${containerInput.model}`);
       return { model: containerInput.model, cleanPrompt: currentPrompt };
     }
-    const classified = classifyModel(currentPrompt);
+    const classified = classifyModel({
+      prompt: currentPrompt,
+      isScheduledTask: containerInput.isScheduledTask,
+      hasSession: !!sessionId,
+      groupFolder: containerInput.groupFolder,
+    });
     return { model: classified, cleanPrompt: currentPrompt };
   };
 
