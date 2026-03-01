@@ -28,6 +28,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
+  model?: string;
 }
 
 interface ContainerOutput {
@@ -35,6 +36,7 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  model?: string;
 }
 
 interface SessionEntry {
@@ -116,6 +118,78 @@ function writeOutput(output: ContainerOutput): void {
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
+}
+
+/**
+ * Call Haiku to classify whether a prompt needs Opus or Sonnet.
+ * Returns 'claude-opus-4-6' or 'claude-sonnet-4-6'. Falls back to sonnet on error.
+ */
+async function classifyModel(
+  prompt: string,
+  apiKey: string,
+): Promise<'claude-opus-4-6' | 'claude-sonnet-4-6'> {
+  try {
+    const truncated = prompt.slice(0, 2000);
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 10,
+        messages: [
+          {
+            role: 'user',
+            content: `Classify this prompt's complexity. Reply with exactly one word: "opus" if it requires deep reasoning, complex analysis, or creative work; "sonnet" if it's straightforward.\n\nPrompt: ${truncated}`,
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      log(`Classifier HTTP error: ${response.status}`);
+      return 'claude-sonnet-4-6';
+    }
+
+    const data = await response.json() as {
+      content?: Array<{ type: string; text?: string }>;
+    };
+    const text = data.content?.[0]?.text?.trim().toLowerCase() || '';
+    if (text.includes('opus')) {
+      log('Classifier selected: opus');
+      return 'claude-opus-4-6';
+    }
+    log('Classifier selected: sonnet');
+    return 'claude-sonnet-4-6';
+  } catch (err) {
+    log(`Classifier error: ${err instanceof Error ? err.message : String(err)}`);
+    return 'claude-sonnet-4-6';
+  }
+}
+
+/**
+ * Check for @opus or @sonnet override tag in the prompt.
+ * Returns the resolved model and the prompt with the tag stripped.
+ */
+function parseModelOverride(prompt: string): { model: string | null; cleanPrompt: string } {
+  const opusMatch = prompt.match(/\b@opus\b/i);
+  if (opusMatch) {
+    return {
+      model: 'claude-opus-4-6',
+      cleanPrompt: prompt.replace(/\s*\b@opus\b\s*/i, ' ').trim(),
+    };
+  }
+  const sonnetMatch = prompt.match(/\b@sonnet\b/i);
+  if (sonnetMatch) {
+    return {
+      model: 'claude-sonnet-4-6',
+      cleanPrompt: prompt.replace(/\s*\b@sonnet\b\s*/i, ' ').trim(),
+    };
+  }
+  return { model: null, cleanPrompt: prompt };
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -360,6 +434,7 @@ async function runQuery(
   mcpServerPath: string,
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
+  resolvedModel: string,
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
@@ -417,7 +492,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      model: 'claude-sonnet-4-6',
+      model: resolvedModel as any,
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
@@ -481,7 +556,8 @@ async function runQuery(
       writeOutput({
         status: 'success',
         result: textResult || null,
-        newSessionId
+        newSessionId,
+        model: resolvedModel,
       });
     }
   }
@@ -536,13 +612,35 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
+  // Resolve model: user override > config > classifier
+  const apiKey = sdkEnv.ANTHROPIC_API_KEY || sdkEnv.CLAUDE_CODE_OAUTH_TOKEN || '';
+  const resolveModel = async (currentPrompt: string): Promise<{ model: string; cleanPrompt: string }> => {
+    const override = parseModelOverride(currentPrompt);
+    if (override.model) {
+      log(`Model override: ${override.model}`);
+      return { model: override.model, cleanPrompt: override.cleanPrompt };
+    }
+    if (containerInput.model) {
+      log(`Config model: ${containerInput.model}`);
+      return { model: containerInput.model, cleanPrompt: currentPrompt };
+    }
+    const classified = await classifyModel(currentPrompt, apiKey);
+    return { model: classified, cleanPrompt: currentPrompt };
+  };
+
+  const { model: resolvedModel, cleanPrompt } = await resolveModel(prompt);
+  prompt = cleanPrompt;
+  log(`Resolved model: ${resolvedModel}`);
+  try { fs.writeFileSync('/workspace/ipc/model.txt', resolvedModel); } catch { /* ignore */ }
+
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
+  let currentModel = resolvedModel;
   try {
     while (true) {
-      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
+      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'}, model: ${currentModel})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, currentModel, resumeAt);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
@@ -559,7 +657,7 @@ async function main(): Promise<void> {
       }
 
       // Emit session update so host can track it
-      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+      writeOutput({ status: 'success', result: null, newSessionId: sessionId, model: currentModel });
 
       log('Query ended, waiting for next IPC message...');
 
@@ -571,7 +669,13 @@ async function main(): Promise<void> {
       }
 
       log(`Got new message (${nextMessage.length} chars), starting new query`);
-      prompt = nextMessage;
+
+      // Re-resolve model for follow-up messages
+      const { model: newModel, cleanPrompt: newCleanPrompt } = await resolveModel(nextMessage);
+      prompt = newCleanPrompt;
+      currentModel = newModel;
+      log(`Re-resolved model: ${currentModel}`);
+      try { fs.writeFileSync('/workspace/ipc/model.txt', currentModel); } catch { /* ignore */ }
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
