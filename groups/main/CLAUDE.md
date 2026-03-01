@@ -34,6 +34,16 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 When working as a sub-agent or teammate, only use `send_message` if instructed to by the main agent.
 
+### Model selection for subagents
+
+When spawning subagents via the `Task` tool, choose the model based on complexity:
+
+- `model: "haiku"` — simple, fast tasks: formatting, summarizing short text, quick lookups, drafting short messages, unit conversions, yes/no checks
+- `model: "sonnet"` — default for most tasks: research, writing, coding, analysis, multi-step reasoning
+- `model: "opus"` — hard problems only: complex multi-step research, architecture decisions, deep reasoning, tasks where accuracy is critical and you expect many tool calls
+
+Use Haiku liberally for menial subtasks — it's much cheaper and faster.
+
 ## Memory
 
 The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
@@ -67,6 +77,29 @@ Main has read-only access to the project and read-write access to its group fold
 |----------------|-----------|--------|
 | `/workspace/project` | Project root | read-only |
 | `/workspace/group` | `groups/main/` | read-write |
+| `/workspace/extra/grocery-plan` | `~/dev/grocery-plan` | read-write |
+| `/workspace/extra/dashboard` | `~/dev/NanoClaw/dashboard` | read-write |
+
+### Dashboard (`/workspace/extra/dashboard`)
+
+NanoClaw dashboard interface. Key directories:
+- `web/` — Frontend (Vite + React)
+- `api/` — API server
+
+You can read and edit dashboard files directly. After editing, a rebuild is needed (`npm run build` in `web/`) for production, or the dev server picks up changes automatically.
+
+### Grocery Planning Repo (`/workspace/extra/grocery-plan`)
+
+Family grocery budget and meal planning system for a family of 4 in Sarasota, FL ($900/month budget). Key files:
+- `README.md` — overview, family context, how the system works
+- `budget.md` — monthly budget breakdown by store
+- `meal-plans/week-a.md`, `meal-plans/week-b.md` — 2-week dinner rotation
+- `shopping-lists/` — per-store lists (Costco, Walmart, Publix, Detwiler's)
+- `school-lunches.md` — daughter's nut-free lunch rotation
+- `pantry-staples.md` — master pantry/freezer list
+- `store-strategy.md` — what to buy where and why
+
+You can read and update these files directly when asked to help with meal planning, shopping lists, or budget tracking.
 
 Key paths inside the container:
 - `/workspace/project/store/messages.db` - SQLite database

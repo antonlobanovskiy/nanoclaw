@@ -8,7 +8,8 @@ import {
   POLL_INTERVAL,
   TRIGGER_PATTERN,
 } from './config.js';
-import { WhatsAppChannel } from './channels/whatsapp.js';
+import './channels/discord.js';
+import { createChannels } from './channels/registry.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -51,7 +52,6 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -187,7 +187,43 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
+  // React 👀 to the last user message so they know we saw it immediately
+  const lastMsg = missedMessages[missedMessages.length - 1];
+  if (lastMsg && !lastMsg.is_bot_message) {
+    channel
+      .reactToMessage?.(
+        chatJid,
+        lastMsg.id,
+        lastMsg.is_from_me ?? false,
+        lastMsg.sender,
+        '👀',
+      )
+      ?.catch((err) =>
+        logger.debug({ chatJid, err }, 'Failed to send 👀 reaction'),
+      );
+  }
+
   await channel.setTyping?.(chatJid, true);
+
+  // Heartbeat: let the user know we're still working every 2 minutes.
+  // Cleared as soon as the agent sends its first response (not on container exit,
+  // which can be 30 min later due to idle timeout).
+  const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000;
+  let heartbeatCleared = false;
+  const heartbeat = setInterval(() => {
+    channel
+      .sendMessage(chatJid, '⏳')
+      .catch((err) =>
+        logger.debug({ chatJid, err }, 'Failed to send heartbeat'),
+      );
+  }, HEARTBEAT_INTERVAL_MS);
+  const clearHeartbeat = () => {
+    if (!heartbeatCleared) {
+      heartbeatCleared = true;
+      clearInterval(heartbeat);
+    }
+  };
+
   let hadError = false;
   let outputSentToUser = false;
 
@@ -210,15 +246,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
 
     if (result.status === 'success') {
+      // Agent finished its current query — stop the heartbeat and mark idle
+      clearHeartbeat();
       queue.notifyIdle(chatJid);
     }
 
     if (result.status === 'error') {
+      clearHeartbeat();
       hadError = true;
     }
   });
 
   await channel.setTyping?.(chatJid, false);
+  clearHeartbeat();
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -474,10 +514,14 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
   };
 
-  // Create and connect channels
-  whatsapp = new WhatsAppChannel(channelOpts);
-  channels.push(whatsapp);
-  await whatsapp.connect();
+  // Create and connect all registered channels
+  const created = createChannels(channelOpts);
+  if (created.length === 0) {
+    logger.fatal('No channels configured — set DISCORD_BOT_TOKEN in .env');
+    process.exit(1);
+  }
+  channels.push(...created);
+  for (const ch of channels) await ch.connect();
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -504,8 +548,14 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) =>
-      whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+    syncGroupMetadata: (force) => {
+      const ch = channels.find(
+        (c) =>
+          typeof (c as { syncGroupMetadata?: unknown }).syncGroupMetadata ===
+          'function',
+      ) as undefined | { syncGroupMetadata(force?: boolean): Promise<void> };
+      return ch?.syncGroupMetadata(force) ?? Promise.resolve();
+    },
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
