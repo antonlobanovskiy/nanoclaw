@@ -24,6 +24,19 @@ vi.mock('../logger.js', () => ({
   },
 }));
 
+// Mock group-folder
+vi.mock('../group-folder.js', () => ({
+  resolveGroupFolderPath: vi.fn((folder: string) => `/mock/groups/${folder}`),
+}));
+
+// Mock fs (only the functions used by image download)
+vi.mock('fs', () => ({
+  default: {
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+  },
+}));
+
 // --- discord.js mock ---
 
 type Handler = (...args: any[]) => any;
@@ -193,6 +206,14 @@ async function triggerMessage(message: any) {
 describe('DiscordChannel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Mock global fetch for image downloads
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)),
+      }),
+    );
   });
 
   afterEach(() => {
@@ -480,13 +501,20 @@ describe('DiscordChannel', () => {
   // --- Attachments ---
 
   describe('attachments', () => {
-    it('stores image attachment with placeholder', async () => {
+    it('downloads image and stores path', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts);
       await channel.connect();
 
       const attachments = new Map([
-        ['att1', { name: 'photo.png', contentType: 'image/png' }],
+        [
+          'att1',
+          {
+            name: 'photo.png',
+            contentType: 'image/png',
+            url: 'https://cdn.discord.com/photo.png',
+          },
+        ],
       ]);
       const msg = createMessage({
         content: '',
@@ -498,7 +526,8 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:1234567890123456',
         expect.objectContaining({
-          content: '[Image: photo.png]',
+          content:
+            '[Attached image — IMPORTANT: You MUST use the Read tool on /workspace/group/media/msg_001-photo.png to see it]',
         }),
       );
     });
@@ -555,7 +584,14 @@ describe('DiscordChannel', () => {
       await channel.connect();
 
       const attachments = new Map([
-        ['att1', { name: 'photo.jpg', contentType: 'image/jpeg' }],
+        [
+          'att1',
+          {
+            name: 'photo.jpg',
+            contentType: 'image/jpeg',
+            url: 'https://cdn.discord.com/photo.jpg',
+          },
+        ],
       ]);
       const msg = createMessage({
         content: 'Check this out',
@@ -567,7 +603,8 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:1234567890123456',
         expect.objectContaining({
-          content: 'Check this out\n[Image: photo.jpg]',
+          content:
+            'Check this out\n[Attached image — IMPORTANT: You MUST use the Read tool on /workspace/group/media/msg_001-photo.jpg to see it]',
         }),
       );
     });
@@ -578,7 +615,14 @@ describe('DiscordChannel', () => {
       await channel.connect();
 
       const attachments = new Map([
-        ['att1', { name: 'a.png', contentType: 'image/png' }],
+        [
+          'att1',
+          {
+            name: 'a.png',
+            contentType: 'image/png',
+            url: 'https://cdn.discord.com/a.png',
+          },
+        ],
         ['att2', { name: 'b.txt', contentType: 'text/plain' }],
       ]);
       const msg = createMessage({
@@ -591,7 +635,8 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:1234567890123456',
         expect.objectContaining({
-          content: '[Image: a.png]\n[File: b.txt]',
+          content:
+            '[Attached image — IMPORTANT: You MUST use the Read tool on /workspace/group/media/msg_001-a.png to see it]\n[File: b.txt]',
         }),
       );
     });

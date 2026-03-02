@@ -5,9 +5,12 @@ import {
   Message,
   TextChannel,
 } from 'discord.js';
+import fs from 'fs';
+import path from 'path';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
@@ -92,28 +95,12 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle attachments — store placeholders so the agent knows something was sent
-      if (message.attachments.size > 0) {
-        const attachmentDescriptions = [...message.attachments.values()].map(
-          (att) => {
-            const contentType = att.contentType || '';
-            if (contentType.startsWith('image/')) {
-              return `[Image: ${att.name || 'image'}]`;
-            } else if (contentType.startsWith('video/')) {
-              return `[Video: ${att.name || 'video'}]`;
-            } else if (contentType.startsWith('audio/')) {
-              return `[Audio: ${att.name || 'audio'}]`;
-            } else {
-              return `[File: ${att.name || 'file'}]`;
-            }
-          },
-        );
-        if (content) {
-          content = `${content}\n${attachmentDescriptions.join('\n')}`;
-        } else {
-          content = attachmentDescriptions.join('\n');
-        }
-      }
+      // Collect attachment metadata (download happens after group check below)
+      const attachments = [...message.attachments.values()].map((att) => ({
+        name: att.name || 'file',
+        contentType: att.contentType || '',
+        url: att.url,
+      }));
 
       // Handle reply context — include who the user is replying to
       if (message.reference?.messageId) {
@@ -142,6 +129,44 @@ export class DiscordChannel implements Channel {
           'Message from unregistered Discord channel',
         );
         return;
+      }
+
+      // Process attachments: download images to group media dir, others get text placeholders
+      if (attachments.length > 0) {
+        const descriptions = await Promise.all(
+          attachments.map(async (att) => {
+            const ct = att.contentType;
+            if (ct.startsWith('image/')) {
+              try {
+                const mediaDir = path.join(
+                  resolveGroupFolderPath(group.folder),
+                  'media',
+                );
+                fs.mkdirSync(mediaDir, { recursive: true });
+                const filename = `${msgId}-${att.name}`;
+                const response = await fetch(att.url);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const buffer = Buffer.from(await response.arrayBuffer());
+                fs.writeFileSync(path.join(mediaDir, filename), buffer);
+                return `[Attached image — IMPORTANT: You MUST use the Read tool on /workspace/group/media/${filename} to see it]`;
+              } catch (err) {
+                logger.warn(
+                  { err, name: att.name },
+                  'Failed to download image attachment',
+                );
+                return `[Image: ${att.name} (download failed)]`;
+              }
+            } else if (ct.startsWith('video/')) {
+              return `[Video: ${att.name}]`;
+            } else if (ct.startsWith('audio/')) {
+              return `[Audio: ${att.name}]`;
+            } else {
+              return `[File: ${att.name}]`;
+            }
+          }),
+        );
+        const desc = descriptions.join('\n');
+        content = content ? `${content}\n${desc}` : desc;
       }
 
       // Deliver message — startMessageLoop() will pick it up
