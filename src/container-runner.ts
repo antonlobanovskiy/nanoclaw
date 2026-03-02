@@ -179,7 +179,14 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
+  const srcIndex = path.join(agentRunnerSrc, 'index.ts');
+  const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
+  const needsCopy =
+    !fs.existsSync(groupAgentRunnerDir) ||
+    (fs.existsSync(srcIndex) &&
+      fs.existsSync(cachedIndex) &&
+      fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
+  if (needsCopy && fs.existsSync(agentRunnerSrc)) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
   mounts.push({
