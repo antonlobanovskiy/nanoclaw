@@ -67,31 +67,15 @@ CREATE INDEX IF NOT EXISTS idx_budget_store ON budget(store);
 SQL
 ```
 
-Also ensure `.browser-state/` and `grocery.db` are gitignored in the grocery-plan repo:
+Also ensure `grocery.db` is gitignored in the grocery-plan repo:
 
 ```bash
 cd /workspace/extra/grocery-plan
 grep -q 'grocery.db' .gitignore 2>/dev/null || cat >> .gitignore <<'EOF'
-.browser-state/
 grocery.db
 grocery.db-journal
 grocery.db-wal
 EOF
-```
-
-## Auth State Files
-
-Saved browser auth states are stored in `/workspace/extra/grocery-plan/.browser-state/`. Load before scraping:
-
-```bash
-agent-browser state load /workspace/extra/grocery-plan/.browser-state/<store>-auth.json
-```
-
-If state is expired or missing, re-authenticate (see per-store sections) and save:
-
-```bash
-mkdir -p /workspace/extra/grocery-plan/.browser-state
-agent-browser state save /workspace/extra/grocery-plan/.browser-state/<store>-auth.json
 ```
 
 ## Recording a Price
@@ -126,110 +110,79 @@ sqlite3 /workspace/extra/grocery-plan/grocery.db \
 
 ## Per-Store Scraping Playbooks
 
-### Costco (costco.com)
+All stores are scraped via Instacart — no login, no captcha, prices visible without authentication. Direct store websites (costco.com, walmart.com) block automated access.
 
-**Auth:** Load saved state. If expired, login:
-1. `agent-browser open https://www.costco.com/`
-2. Find and click "Sign In"
-3. Fill email and password fields with provided credentials
-4. Complete login, wait for dashboard
-5. Save state to `costco-auth.json`
+### Publix (via Instacart)
+
+**URL:** `https://delivery.publix.com/store/publix/search/<item>`
 
 **Scraping an item:**
-1. `agent-browser open https://www.costco.com/`
-2. `agent-browser snapshot -i` — find the search box
-3. `agent-browser fill @<search-ref> "<item name>"`
-4. `agent-browser press Enter`
-5. `agent-browser wait --load networkidle`
-6. `agent-browser snapshot -i` — find product listing with price
-7. Extract price using `agent-browser get text @<price-ref>`
-8. Note the package size for unit price calculation (e.g., "5 dozen eggs" -> price per egg)
-9. Record in SQLite with unit = "per <unit>"
-
-**Tips:**
-- Costco shows member prices by default when logged in
-- Search results page usually shows price without needing to click into product
-- If a "warehouse only" badge appears, note in `notes` column
-- Costco may show "Online Only" items — prefer warehouse items
-
-### Publix (publix.com)
-
-**Auth:** Load saved state. If expired, login:
-1. `agent-browser open https://www.publix.com/`
-2. Click sign in, enter account credentials
-3. Set store location to Sarasota, FL if prompted
-4. Save state to `publix-auth.json`
-
-**Scraping an item:**
-1. `agent-browser open https://www.publix.com/`
-2. Find and use the search bar
-3. `agent-browser fill @<search-ref> "<item name>"`
-4. `agent-browser press Enter`
-5. `agent-browser wait --load networkidle`
-6. `agent-browser snapshot -i` — find product with price
-7. Extract price with `agent-browser get text @<price-ref>`
-8. Check for BOGO or sale tags — if present, note "BOGO" or "sale" in notes
-9. Record in SQLite
-
-**Weekly ad check:**
-1. `agent-browser open https://www.publix.com/savings/weekly-ad`
+1. `agent-browser open https://delivery.publix.com/store/publix/search/<item>`
 2. `agent-browser wait --load networkidle`
-3. `agent-browser snapshot -i` — browse deals
-4. Look for items matching the shopping list or pantry staples
-5. Record deal prices with "weekly ad" in notes
+3. `agent-browser snapshot -i` — find product listing with price
+4. Extract price with `agent-browser get text @<price-ref>`
+5. Check for BOGO or sale tags — if present, note "BOGO" or "sale" in notes. BOGO effective price = half listed price.
+6. Look for per-lb pricing on weighted items
+7. Record in SQLite
 
 **Tips:**
+- delivery.publix.com is Instacart-powered, shows full per-lb pricing
 - Publix deals reset every Wednesday — check Wednesday morning
-- BOGO means buy-one-get-one-free: effective price is half the listed price
-- Publix Club prices require being logged in
+- BOGO deals show on product cards
 
-### Walmart (walmart.com)
+### Costco (via Instacart)
 
-**Auth:** No login required. Set store location on first visit:
-1. `agent-browser open https://www.walmart.com/`
-2. If location prompt appears, search for Sarasota FL Walmart
-3. Save state to `walmart-auth.json` (just for location persistence)
+**URL:** `https://www.instacart.com/store/costco/search/<item>`
 
 **Scraping an item:**
-1. `agent-browser open https://www.walmart.com/`
-2. Find and use the search bar
-3. `agent-browser fill @<search-ref> "<item name>"`
-4. `agent-browser press Enter`
-5. `agent-browser wait --load networkidle`
-6. `agent-browser snapshot -i` — find product listing
-7. Extract price with `agent-browser get text @<price-ref>`
-8. Walmart often shows unit price (e.g., "$0.12/oz") — capture both
-9. Record in SQLite with unit price if available
+1. `agent-browser open https://www.instacart.com/store/costco/search/<item>`
+2. `agent-browser wait --load networkidle`
+3. `agent-browser snapshot -i` — find product listing with price
+4. Extract price with `agent-browser get text @<price-ref>`
+5. Note the package size for unit price calculation (e.g., "5 dozen eggs" -> price per egg)
+6. Record in SQLite with unit = "per <unit>"
 
 **Tips:**
-- Walmart shows "Great Value" store brand prominently — good for budget items
+- Instacart Costco prices may differ slightly from in-store member prices
+- Note "instacart" in notes column
+- Package sizes are usually shown — always calculate per-unit price
+
+### Walmart (via Instacart)
+
+**URL:** `https://www.instacart.com/store/walmart/search/<item>`
+
+**Scraping an item:**
+1. `agent-browser open https://www.instacart.com/store/walmart/search/<item>`
+2. `agent-browser wait --load networkidle`
+3. `agent-browser snapshot -i` — find product listing
+4. Extract price with `agent-browser get text @<price-ref>`
+5. Look for unit price if shown (e.g., "$0.12/oz")
+6. Record in SQLite with unit price if available
+
+**Tips:**
+- Instacart claims "no markups" for Walmart
+- Great Value store brand items are good for budget comparisons
 - Look for "Rollback" tags = temporary price reduction
-- "Pickup" availability tells you if the item is in stock locally
 
 ### Detwiler's (via Instacart)
 
-**Auth:** Load saved state. If expired, login via Google:
-1. `agent-browser open https://www.instacart.com/`
-2. Click sign in, choose "Continue with Google"
-3. Complete Google OAuth flow with provided credentials
-4. Save state to `detwilers-auth.json`
+**URL:** `https://www.instacart.com/store/detwilers-farm-market/search/<item>`
 
 **Scraping an item:**
 1. `agent-browser open https://www.instacart.com/store/detwilers-farm-market/search/<item>`
-2. Or: navigate to Instacart, search for Detwiler's Farm Market, then search item
-3. `agent-browser wait --load networkidle`
-4. `agent-browser snapshot -i` — find product with price
-5. Extract price with `agent-browser get text @<price-ref>`
-6. Record in SQLite with notes = "instacart" (prices may differ from in-store)
+2. `agent-browser wait --load networkidle`
+3. `agent-browser snapshot -i` — find product with price
+4. Extract price with `agent-browser get text @<price-ref>`
+5. Record in SQLite with notes = "instacart" (prices may differ from in-store)
 
 **Tips:**
-- Instacart prices are often 10-15% higher than in-store
+- Instacart prices are often 10-15% higher than in-store for Detwiler's
 - Note this in the shopping list estimate ("Detwiler's prices are Instacart estimates")
 - If Detwiler's is unavailable on Instacart, skip and note in output
 
 ### Trader Joe's (traderjoes.com)
 
-**Auth:** None required.
+**Auth:** None required. Direct website works.
 
 **Scraping an item:**
 1. `agent-browser open https://www.traderjoes.com/home/search?q=<item>&section=products`
@@ -247,7 +200,6 @@ sqlite3 /workspace/extra/grocery-plan/grocery.db \
 
 - **Site down/timeout:** Wait 30s max per item (`agent-browser wait 30000`). If still no result, skip and note "unavailable" in output.
 - **Item not found:** Try alternate search terms (e.g., "chicken breast" -> "boneless skinless chicken"). If still not found, skip and note "not found".
-- **Auth expired:** Attempt re-login. If fails, skip store and alert user: "Could not authenticate with <store> — please check credentials."
 - **CAPTCHA/bot detection:** Skip store and alert user. Add `agent-browser wait 2000` delays between items to reduce detection risk.
 - **Price unclear:** If multiple prices shown (regular vs sale), record the lower effective price and note context.
 
