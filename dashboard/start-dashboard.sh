@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-node "$(dirname "$0")/terminal-dashboard.js"
+exec "$(dirname "$0")/tmux-dashboard.sh"
