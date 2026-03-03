@@ -25,6 +25,7 @@ import {
   OnChatMetadata,
   RegisteredGroup,
 } from '../types.js';
+import { registerChannel, ChannelOpts } from './registry.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -316,6 +317,10 @@ export class WhatsAppChannel implements Channel {
     }
   }
 
+  async syncGroups(force: boolean): Promise<void> {
+    return this.syncGroupMetadata(force);
+  }
+
   /**
    * Sync group metadata from WhatsApp.
    * Fetches all participating groups and stores their names in the database.
@@ -407,3 +412,5 @@ export class WhatsAppChannel implements Channel {
     }
   }
 }
+
+registerChannel('whatsapp', (opts: ChannelOpts) => new WhatsAppChannel(opts));

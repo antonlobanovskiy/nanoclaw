@@ -11,19 +11,18 @@ export interface ChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
-type ChannelFactory = (opts: ChannelOpts) => Channel | null;
+export type ChannelFactory = (opts: ChannelOpts) => Channel | null;
 
-const factories: ChannelFactory[] = [];
+const registry = new Map<string, ChannelFactory>();
 
-export function registerChannel(_name: string, factory: ChannelFactory): void {
-  factories.push(factory);
+export function registerChannel(name: string, factory: ChannelFactory): void {
+  registry.set(name, factory);
 }
 
-export function createChannels(opts: ChannelOpts): Channel[] {
-  const channels: Channel[] = [];
-  for (const factory of factories) {
-    const ch = factory(opts);
-    if (ch) channels.push(ch);
-  }
-  return channels;
+export function getChannelFactory(name: string): ChannelFactory | undefined {
+  return registry.get(name);
+}
+
+export function getRegisteredChannelNames(): string[] {
+  return [...registry.keys()];
 }
