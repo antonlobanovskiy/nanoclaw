@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-.npm-cache/
+
 # Build output
 dist/
 
@@ -9,14 +9,12 @@ store/
 data/
 logs/
 
-# Groups - only track base structure and specific CLAUDE.md files
-groups/*
-!groups/main/
-!groups/global/
-groups/main/*
-groups/global/*
-!groups/main/CLAUDE.md
-!groups/global/CLAUDE.md
+# Groups — contain personal data customized per-installation
+groups/
+
+# Local plans with personal info
+docs/plans/archive/
+docs/plans/grocery-prompts/
 
 # Secrets
 *.keys.json
@@ -34,5 +32,3 @@ groups/global/*
 
 # Skills system (local per-installation state)
 .nanoclaw/
-
-agents-sdk-docs
