@@ -14,7 +14,7 @@ interface QueuedTask {
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
 
-interface GroupState {
+export interface GroupState {
   active: boolean;
   idleWaiting: boolean;
   isTaskContainer: boolean;
@@ -55,6 +55,18 @@ export class GroupQueue {
 
   setProcessMessagesFn(fn: (groupJid: string) => Promise<boolean>): void {
     this.processMessagesFn = fn;
+  }
+
+  getStatus(): {
+    activeCount: number;
+    waitingCount: number;
+    groups: Map<string, GroupState>;
+  } {
+    return {
+      activeCount: this.activeCount,
+      waitingCount: this.waitingGroups.length,
+      groups: new Map(this.groups),
+    };
   }
 
   enqueueMessageCheck(groupJid: string): void {

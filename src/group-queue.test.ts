@@ -398,6 +398,26 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  describe('getStatus', () => {
+    it('returns active and waiting counts', () => {
+      const status = queue.getStatus();
+      expect(status.activeCount).toBe(0);
+      expect(status.waitingCount).toBe(0);
+      expect(status.groups).toBeInstanceOf(Map);
+    });
+
+    it('reflects active containers after enqueue', async () => {
+      const processMessages = vi.fn(async () => {
+        const status = queue.getStatus();
+        expect(status.activeCount).toBe(1);
+        return true;
+      });
+      queue.setProcessMessagesFn(processMessages);
+      queue.enqueueMessageCheck('group-a');
+      await vi.advanceTimersByTimeAsync(200);
+    });
+  });
+
   it('preempts when idle arrives with pending tasks', async () => {
     const fs = await import('fs');
     let resolveProcess: () => void;
