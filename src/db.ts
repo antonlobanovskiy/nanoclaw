@@ -494,6 +494,99 @@ export function logTaskRun(log: TaskRunLog): void {
   );
 }
 
+// --- Dashboard query functions ---
+
+export interface MessageStats {
+  today: number;
+  hourly: Array<{ hour: string; count: number }>;
+  byChannel: Array<{ channel: string; count: number }>;
+  daily: Array<{ date: string; count: number }>;
+}
+
+export function getMessageStats(): MessageStats {
+  const now = new Date();
+  const todayStart = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  ).toISOString();
+  const yesterday = new Date(now.getTime() - 24 * 3600_000).toISOString();
+  const weekAgo = new Date(
+    now.getTime() - 7 * 24 * 3600_000,
+  ).toISOString();
+
+  const today = (
+    db
+      .prepare(`SELECT COUNT(*) as count FROM messages WHERE timestamp >= ?`)
+      .get(todayStart) as { count: number }
+  ).count;
+
+  const hourly = db
+    .prepare(
+      `
+    SELECT strftime('%Y-%m-%dT%H:00:00', timestamp) as hour, COUNT(*) as count
+    FROM messages WHERE timestamp >= ?
+    GROUP BY hour ORDER BY hour
+  `,
+    )
+    .all(yesterday) as Array<{ hour: string; count: number }>;
+
+  const byChannel = db
+    .prepare(
+      `
+    SELECT c.channel, COUNT(*) as count
+    FROM messages m JOIN chats c ON m.chat_jid = c.jid
+    WHERE m.timestamp >= ?
+    GROUP BY c.channel
+  `,
+    )
+    .all(todayStart) as Array<{ channel: string; count: number }>;
+
+  const daily = db
+    .prepare(
+      `
+    SELECT date(timestamp) as date, COUNT(*) as count
+    FROM messages WHERE timestamp >= ?
+    GROUP BY date ORDER BY date
+  `,
+    )
+    .all(weekAgo) as Array<{ date: string; count: number }>;
+
+  return { today, hourly, byChannel, daily };
+}
+
+export function getRecentTaskRunLogs(limit: number): TaskRunLog[] {
+  return db
+    .prepare(
+      `SELECT task_id, run_at, duration_ms, status, result, error
+     FROM task_run_logs ORDER BY run_at DESC LIMIT ?`,
+    )
+    .all(limit) as TaskRunLog[];
+}
+
+export interface GroupWithActivity {
+  jid: string;
+  name: string;
+  folder: string;
+  channel: string | null;
+  lastActivity: string | null;
+  isMain: boolean;
+}
+
+export function getGroupsWithActivity(): GroupWithActivity[] {
+  return db
+    .prepare(
+      `
+    SELECT rg.jid, rg.name, rg.folder, c.channel,
+           c.last_message_time as lastActivity, rg.is_main as isMain
+    FROM registered_groups rg
+    LEFT JOIN chats c ON rg.jid = c.jid
+    ORDER BY c.last_message_time DESC
+  `,
+    )
+    .all() as GroupWithActivity[];
+}
+
 // --- Router state accessors ---
 
 export function getRouterState(key: string): string | undefined {

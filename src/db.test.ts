@@ -6,9 +6,13 @@ import {
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
+  getGroupsWithActivity,
+  getMessageStats,
   getMessagesSince,
   getNewMessages,
+  getRecentTaskRunLogs,
   getTaskById,
+  logTaskRun,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -422,5 +426,85 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+describe('getMessageStats', () => {
+  it('returns hourly counts for last 24h', () => {
+    storeChatMetadata(
+      'dc:123',
+      '2024-01-01T12:00:00.000Z',
+      'test',
+      'discord',
+      true,
+    );
+    const now = new Date();
+    for (let i = 0; i < 5; i++) {
+      const ts = new Date(now.getTime() - i * 3600_000);
+      store({
+        id: `msg-${i}`,
+        chat_jid: 'dc:123',
+        sender: 'user1',
+        sender_name: 'User',
+        content: `message ${i}`,
+        timestamp: ts.toISOString(),
+      });
+    }
+    const stats = getMessageStats();
+    expect(stats.today).toBeGreaterThanOrEqual(5);
+    expect(stats.hourly).toBeInstanceOf(Array);
+    expect(stats.hourly.length).toBeLessThanOrEqual(24);
+    expect(stats.byChannel).toBeInstanceOf(Array);
+  });
+});
+
+describe('getRecentTaskRunLogs', () => {
+  it('returns recent task run logs', () => {
+    createTask({
+      id: 'task-1',
+      group_folder: 'test',
+      chat_jid: 'dc:123',
+      prompt: 'test task',
+      schedule_type: 'cron',
+      schedule_value: '0 8 * * *',
+      context_mode: 'isolated',
+      next_run: new Date().toISOString(),
+      status: 'active',
+      created_at: new Date().toISOString(),
+    });
+    logTaskRun({
+      task_id: 'task-1',
+      run_at: new Date().toISOString(),
+      duration_ms: 5000,
+      status: 'success',
+      result: 'done',
+      error: null,
+    });
+    const logs = getRecentTaskRunLogs(10);
+    expect(logs.length).toBe(1);
+    expect(logs[0].task_id).toBe('task-1');
+    expect(logs[0].duration_ms).toBe(5000);
+  });
+});
+
+describe('getGroupsWithActivity', () => {
+  it('joins registered_groups with chats for last activity', () => {
+    storeChatMetadata(
+      'dc:123',
+      '2024-01-01T12:00:00.000Z',
+      'Test Group',
+      'discord',
+      true,
+    );
+    setRegisteredGroup('dc:123', {
+      name: 'Test Group',
+      folder: 'test',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+    const groups = getGroupsWithActivity();
+    expect(groups.length).toBe(1);
+    expect(groups[0].name).toBe('Test Group');
+    expect(groups[0].lastActivity).toBe('2024-01-01T12:00:00.000Z');
   });
 });
