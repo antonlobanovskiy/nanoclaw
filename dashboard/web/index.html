@@ -577,6 +577,7 @@
     groups: [],
     tasks: [],
     taskHistory: [],
+    transcriptEvents: [],
     status: null,
     messageStats: null,
     ws: null,
@@ -652,7 +653,7 @@
     state.status = data;
 
     $('hdr-dot').className = 'dot';
-    $('hdr-uptime').textContent = `up ${formatUptime(data.uptime || 0)}`;
+    $('hdr-uptime').textContent = `up ${formatUptime(Math.floor((data.uptime || 0) / 1000))}`;
 
     const cpuPct = Math.round(data.cpu || 0);
     $('bar-cpu').style.width = `${cpuPct}%`;
@@ -749,8 +750,8 @@
 
     el.innerHTML = activeTasks.map(t => {
       const lastHist = historyByTask[t.id]?.[0];
-      const lastOk = t.last_result === 'ok' || lastHist?.status === 'ok';
-      const lastFail = t.last_result === 'error' || t.last_result === 'timeout' || lastHist?.status === 'error';
+      const lastOk = lastHist?.status === 'success' || (t.last_run && !lastHist);
+      const lastFail = lastHist?.status === 'error';
       const iconClass = lastFail ? 'fail' : (lastOk ? 'ok' : 'pending');
       const iconChar = lastFail ? '\u2717' : (lastOk ? '\u2713' : '\u25cb');
 
@@ -868,9 +869,11 @@
   const loadTranscript = async folder => {
     $('tx-group').textContent = `[${folder}]`;
     $('transcript-body').innerHTML = '<div class="transcript-empty">Loading...</div>';
+    state.transcriptEvents = [];
     const data = await api(`/api/transcript/${encodeURIComponent(folder)}`);
     if (data) {
-      renderTranscriptEvents(Array.isArray(data) ? data : []);
+      state.transcriptEvents = Array.isArray(data) ? data : [];
+      renderTranscriptEvents(state.transcriptEvents);
     } else {
       $('transcript-body').innerHTML = '<div class="transcript-empty">Failed to load transcript</div>';
     }
@@ -888,11 +891,11 @@
 
     const maxCount = Math.max(...hourly.map(h => h.count), 1);
 
-    const bars = Array.from({ length: 24 }, (_, i) => {
-      const entry = hourly.find(h => h.hour === i);
-      const count = entry ? entry.count : 0;
-      const pct = (count / maxCount) * 100;
-      return `<div class="bar" style="height:${Math.max(pct, 3)}%" title="${i}:00 - ${count} msgs"></div>`;
+    const bars = hourly.map(h => {
+      const pct = (h.count / maxCount) * 100;
+      const hour = new Date(h.hour).getHours();
+      const label = hour === 0 ? '12am' : hour < 12 ? `${hour}am` : hour === 12 ? '12pm' : `${hour - 12}pm`;
+      return `<div class="bar" style="height:${Math.max(pct, 3)}%" title="${label} - ${h.count} msgs"></div>`;
     }).join('');
 
     const labelStart = '12am';
@@ -932,8 +935,8 @@
     const el = document.getElementById('container-stats');
     if (!el) return;
 
-    const active = containers ? containers.filter(c => c.status === 'running').length : 0;
     const total = containers ? containers.length : 0;
+    const active = total; // docker ps only shows running containers
 
     el.innerHTML = `
       <div class="stat-box">
@@ -991,8 +994,12 @@
             renderTasks(msg.data?.tasks, msg.data?.history);
             break;
           case 'transcript':
-            if (state.selectedGroup) {
-              renderTranscriptEvents(msg.data);
+            if (state.selectedGroup && Array.isArray(msg.data)) {
+              state.transcriptEvents.push(...msg.data);
+              if (state.transcriptEvents.length > 500) {
+                state.transcriptEvents = state.transcriptEvents.slice(-500);
+              }
+              renderTranscriptEvents(state.transcriptEvents);
             }
             break;
         }
