@@ -5,7 +5,11 @@ import fs from 'fs';
 import { exec } from 'child_process';
 import { WebSocketServer, WebSocket } from 'ws';
 
-import { DASHBOARD_PORT, MAX_CONCURRENT_CONTAINERS, STORE_DIR } from './config.js';
+import {
+  DASHBOARD_PORT,
+  MAX_CONCURRENT_CONTAINERS,
+  STORE_DIR,
+} from './config.js';
 import {
   getAllTasks,
   getGroupsWithActivity,
@@ -328,9 +332,7 @@ export function startDashboard(opts: DashboardOptions): void {
               }
 
               if (events.length > 0 && ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({ type: 'transcript', data: events }),
-                );
+                ws.send(JSON.stringify({ type: 'transcript', data: events }));
               }
             } catch {
               /* skip */
@@ -397,6 +399,17 @@ export function startDashboard(opts: DashboardOptions): void {
       }
     }
   }, 10_000);
+
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      logger.warn(
+        { port: DASHBOARD_PORT },
+        'Dashboard port in use, dashboard disabled',
+      );
+    } else {
+      logger.error({ err }, 'Dashboard server error');
+    }
+  });
 
   server.listen(DASHBOARD_PORT, '0.0.0.0', () => {
     logger.info({ port: DASHBOARD_PORT }, 'Dashboard server started');
