@@ -43,7 +43,6 @@ export interface RegisteredGroup {
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
 }
 
-
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -70,7 +69,6 @@ export interface ScheduledTask {
   status: 'active' | 'paused' | 'completed';
   created_at: string;
 }
-
 
 export interface TaskRunLog {
   task_id: string;

@@ -511,9 +511,7 @@ export function getMessageStats(): MessageStats {
     now.getDate(),
   ).toISOString();
   const yesterday = new Date(now.getTime() - 24 * 3600_000).toISOString();
-  const weekAgo = new Date(
-    now.getTime() - 7 * 24 * 3600_000,
-  ).toISOString();
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 3600_000).toISOString();
 
   const today = (
     db
