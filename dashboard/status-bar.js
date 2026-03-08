@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 /**
- * Status bar pane: service status, CPU/mem bars, agent count, clock.
- * Redraws every 2s. Outputs 3 lines to fill the tmux pane.
+ * Status bar pane: service status, CPU/mem bars, container/subagent counts, clock.
  */
 import os from 'os';
 import { exec } from 'child_process';
 import {
-  ESC, RESET, BOLD, DIM, RED, CYAN, YELLOW, B_GREEN, ORANGE,
-  now, renderBar, loadGroups, findLatestJsonl,
+  ESC, RESET, BOLD, DIM, RED, CYAN, YELLOW, B_GREEN, ORANGE, PURPLE,
+  now, renderBar, loadGroups, loadContainers, findLatestJsonl, countSubagents,
 } from './lib.js';
 
 let serviceStatus = 'unknown';
@@ -36,29 +35,32 @@ function readStats() {
   mem = Math.round((1 - os.freemem() / os.totalmem()) * 100);
 }
 
-function countActiveAgents() {
-  const groups = loadGroups();
-  const nowMs = Date.now();
-  return groups.filter(g => {
-    const latest = findLatestJsonl(g.folder ?? g.name);
-    return latest && (nowMs - latest.mtime) < 60_000;
-  }).length;
-}
-
 function render() {
-  const cols = process.stdout.columns || 120;
   readStats();
+  const containers = loadContainers();
+  const groups = loadGroups();
+
+  // Count subagents across running containers
+  let totalSubagents = 0;
+  for (const g of groups) {
+    const folder = g.folder ?? g.name;
+    const hasContainer = containers.some(c => c.name?.startsWith(`nanoclaw-${folder}-`));
+    if (hasContainer) {
+      const latest = findLatestJsonl(folder);
+      if (latest) totalSubagents += countSubagents(latest.path).active;
+    }
+  }
 
   const statusColor = serviceStatus === 'active' ? B_GREEN : RED;
   const statusDot = serviceStatus === 'active' ? '●' : '○';
-  const agentCount = countActiveAgents();
 
   const left = `${BOLD}${ORANGE} NANOCLAW${RESET}  ${statusColor}${statusDot} ${serviceStatus}${RESET}` +
     `  cpu ${renderBar(cpu, 8, CYAN)}${String(cpu).padStart(3)}%` +
     `  mem ${renderBar(mem, 8, YELLOW)}${String(mem).padStart(3)}%` +
-    `  agents:${agentCount}`;
+    `  containers:${containers.length}` +
+    (totalSubagents > 0 ? `  ${PURPLE}subagents:${totalSubagents}${RESET}` : '');
 
-  const right = `${DIM}q${RESET}:quit  ${BOLD}${now()}${RESET} `;
+  const right = `${DIM}tab${RESET}:cycle  ${DIM}i${RESET}:input  ${DIM}q${RESET}:quit  ${BOLD}${now()}${RESET} `;
 
   process.stdout.write(`${ESC}H${ESC}2J${left}${right}`);
 }

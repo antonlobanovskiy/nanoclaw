@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 /**
- * Agent list pane: single-row horizontal display of all agents with status.
+ * Agent list pane: shows all agents with container status, subagents, last used.
  * Auto-selects the most recently active agent and writes to /tmp/nc-dash-agent.
  */
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
 import {
-  ESC, RESET, BOLD, DIM, GRAY, GREEN, B_GREEN,
-  loadGroups, findLatestJsonl, formatAge, AGENT_FILE, BASE,
+  ESC, RESET, BOLD, DIM, GRAY, GREEN, B_GREEN, CYAN, PURPLE,
+  loadGroups, loadContainers, findLatestJsonl, countSubagents,
+  formatAge, relativeTime, AGENT_FILE, BASE,
 } from './lib.js';
 
 let agents = [];
@@ -17,22 +18,40 @@ let manualSelection = false;
 
 function scanAgents() {
   const groups = loadGroups();
+  const containers = loadContainers();
   const nowMs = Date.now();
+
   agents = groups.map(g => {
     const name = g.folder ?? g.name;
     const latest = findLatestJsonl(name);
-    const active = latest && (nowMs - latest.mtime) < 60_000;
-    const lastSeen = latest ? latest.mtime : null;
+    const container = containers.find(c => c.name?.startsWith(`nanoclaw-${name}-`));
+    const containerRunning = !!container;
+    const subagents = containerRunning && latest ? countSubagents(latest.path) : { active: 0, total: 0 };
+
     let model = null;
     try {
       const raw = fs.readFileSync(path.join(BASE, 'data', 'ipc', name, 'model.txt'), 'utf8').trim();
       model = raw.replace('claude-', '').replace('-4-6', '');
     } catch { }
-    return { name, active, lastSeen, model };
+
+    return {
+      name,
+      displayName: g.name || name,
+      containerRunning,
+      containerStatus: container?.status || null,
+      lastActivity: g.lastActivity,
+      isMain: g.isMain,
+      model,
+      subagents,
+    };
   });
 
   if (!manualSelection) {
-    const sorted = [...agents].filter(a => a.active).sort((a, b) => b.lastSeen - a.lastSeen);
+    const sorted = [...agents].filter(a => a.containerRunning).sort((a, b) => {
+      const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+      const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+      return bTime - aTime;
+    });
     if (sorted.length > 0) {
       selectedName = sorted[0].name;
     } else if (!selectedName && agents.length > 0) {
@@ -46,16 +65,33 @@ function scanAgents() {
 }
 
 function render() {
+  const cols = process.stdout.columns || 120;
   const parts = [];
+
   for (const a of agents) {
-    const sel = a.name === selectedName ? '▸' : ' ';
-    const dot = a.active ? `${B_GREEN}●${RESET}` : `${GRAY}○${RESET}`;
-    const name = a.name;
-    const age = a.lastSeen
-      ? (a.active ? `${GREEN}active${RESET}` : `${GRAY}${formatAge(a.lastSeen)}${RESET}`)
+    const sel = a.name === selectedName ? `${CYAN}▸${RESET}` : ' ';
+    const dot = a.containerRunning ? `${B_GREEN}●${RESET}` : `${GRAY}○${RESET}`;
+    const nameStr = `${BOLD}${a.name}${RESET}`;
+
+    // Container status
+    const cStatus = a.containerRunning
+      ? `${GREEN}running${RESET}`
+      : `${GRAY}idle${RESET}`;
+
+    // Last used
+    const lastUsed = a.lastActivity
+      ? `${GRAY}${relativeTime(a.lastActivity)}${RESET}`
       : `${GRAY}never${RESET}`;
+
+    // Subagents
+    const subStr = a.containerRunning && a.subagents.active > 0
+      ? ` ${PURPLE}${a.subagents.active}sub${RESET}`
+      : '';
+
+    // Model
     const modelTag = a.model ? ` ${DIM}${a.model}${RESET}` : '';
-    parts.push(`${sel}${dot} ${BOLD}${name}${RESET} ${age}${modelTag}`);
+
+    parts.push(`${sel}${dot} ${nameStr} ${cStatus}${subStr} ${lastUsed}${modelTag}`);
   }
 
   const line = agents.length > 0
@@ -83,5 +119,5 @@ if (process.stdin.isTTY) {
 
 scanAgents();
 render();
-setInterval(scanAgents, 2_000);
+setInterval(scanAgents, 3_000);
 setInterval(render, 2_000);

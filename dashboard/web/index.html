@@ -333,6 +333,41 @@
   .tx-label.assistant { color: var(--green); }
   .tx-label.tool-use { color: var(--yellow); }
   .tx-label.tool-result { color: var(--dim); }
+  .tx-label.subagent { color: #d2a8ff; }
+  .tx-label.subagent-result { color: #d2a8ff; opacity: 0.7; }
+
+  .tx-input-bar {
+    display: flex;
+    gap: 6px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .tx-input-bar input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 6px 8px;
+    outline: none;
+  }
+  .tx-input-bar input:focus { border-color: var(--cyan); }
+  .tx-input-bar button {
+    background: var(--cyan);
+    color: var(--bg);
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .tx-input-bar button:hover { opacity: 0.85; }
+  .tx-input-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .tx-content {
     font-size: 12px;
@@ -555,6 +590,10 @@
       <div class="panel-body" id="transcript-body">
         <div class="transcript-empty">Select an agent to view transcript</div>
       </div>
+      <div class="tx-input-bar" id="tx-input-bar" style="display:none">
+        <input type="text" id="tx-input" placeholder="Send message to agent..." autocomplete="off" />
+        <button id="tx-send">Send</button>
+      </div>
     </div>
 
     <!-- Analytics -->
@@ -578,6 +617,7 @@
     tasks: [],
     taskHistory: [],
     transcriptEvents: [],
+    containers: [],
     status: null,
     messageStats: null,
     ws: null,
@@ -698,17 +738,35 @@
     el.innerHTML = groups.map(g => {
       const now = Date.now();
       const lastAct = g.lastActivity ? new Date(g.lastActivity).getTime() : 0;
-      const isActive = (now - lastAct) < 60000;
       const sel = state.selectedGroup === g.folder;
-      const timeStr = isActive
-        ? `active ${formatDuration(now - lastAct)}`
-        : (lastAct ? `idle ${relativeTime(g.lastActivity)}` : 'idle');
+
+      // Check if a container is running for this group
+      const container = (state.containers || []).find(c => c.name && c.name.startsWith(`nanoclaw-${g.folder}-`));
+      const containerRunning = !!container;
+      const isActive = containerRunning;
+
+      // Container status line
+      const containerStr = containerRunning
+        ? `<span style="color:var(--green)">container running</span> (${escHtml(container.status)})`
+        : '<span>container idle</span>';
+
+      // Subagent info — only show when container is actually running
+      const sub = g.subagents || { active: 0, total: 0 };
+      const subagentStr = containerRunning && sub.active > 0
+        ? ` <span style="color:#d2a8ff">${sub.active} subagent${sub.active > 1 ? 's' : ''}</span>`
+        : '';
+
+      // Last used line
+      const lastUsedStr = lastAct
+        ? `last used ${relativeTime(g.lastActivity)}`
+        : 'never used';
 
       return `<div class="agent-item${sel ? ' selected' : ''}" data-folder="${escHtml(g.folder)}">
         <span class="agent-dot ${isActive ? 'active' : 'idle'}"></span>
         <div class="agent-info">
           <div class="agent-name">${escHtml(g.name || g.folder)}${g.isMain ? ' <span style="color:var(--dim);font-size:10px">(main)</span>' : ''}</div>
-          <div class="agent-status">${timeStr}</div>
+          <div class="agent-status">${containerStr}${subagentStr}</div>
+          <div class="agent-status">${lastUsedStr}</div>
         </div>
         ${g.channel ? `<span class="agent-channel">${escHtml(g.channel)}</span>` : ''}
       </div>`;
@@ -724,11 +782,42 @@
     renderAgents(state.groups);
     loadTranscript(folder);
 
+    // Show input bar
+    const inputBar = $('tx-input-bar');
+    inputBar.style.display = folder ? 'flex' : 'none';
+
     // Subscribe via WebSocket
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
       state.ws.send(JSON.stringify({ type: 'subscribe', group: folder }));
     }
   };
+
+  // ─── Dashboard Input ───
+  const sendDashboardMessage = async () => {
+    const input = $('tx-input');
+    const btn = $('tx-send');
+    const text = input.value.trim();
+    if (!text || !state.selectedGroup) return;
+
+    btn.disabled = true;
+    input.value = '';
+    try {
+      await fetch(`${BASE}/api/groups/${encodeURIComponent(state.selectedGroup)}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+    } catch (e) {
+      console.warn('Send failed:', e);
+    }
+    btn.disabled = false;
+    input.focus();
+  };
+
+  $('tx-send').addEventListener('click', sendDashboardMessage);
+  $('tx-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') sendDashboardMessage();
+  });
 
   // ─── Scheduled Tasks ───
   const renderTasks = (tasks, history) => {
@@ -748,31 +837,52 @@
       historyByTask[h.task_id].push(h);
     });
 
-    el.innerHTML = activeTasks.map(t => {
-      const lastHist = historyByTask[t.id]?.[0];
-      const lastOk = lastHist?.status === 'success' || (t.last_run && !lastHist);
-      const lastFail = lastHist?.status === 'error';
-      const iconClass = lastFail ? 'fail' : (lastOk ? 'ok' : 'pending');
-      const iconChar = lastFail ? '\u2717' : (lastOk ? '\u2713' : '\u25cb');
+    // Group tasks by group_folder
+    const tasksByGroup = {};
+    activeTasks.forEach(t => {
+      const folder = t.group_folder || 'unknown';
+      if (!tasksByGroup[folder]) tasksByGroup[folder] = [];
+      tasksByGroup[folder].push(t);
+    });
 
-      const lastDur = lastHist?.duration_ms ? formatDuration(lastHist.duration_ms) : '--';
-      const lastStatus = lastFail ? 'failed' : (lastOk ? lastDur : '--');
+    const formatTime = iso => {
+      if (!iso) return '--';
+      const d = new Date(iso);
+      return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    };
 
-      const prompt = t.prompt || t.id || 'task';
-      const shortPrompt = truncate(prompt, 30);
-      const schedVal = t.schedule_value || '';
+    el.innerHTML = Object.entries(tasksByGroup).map(([folder, tasks]) => {
+      const groupLabel = (state.groups || []).find(g => g.folder === folder)?.name || folder;
+      const taskHtml = tasks.map(t => {
+        const lastHist = historyByTask[t.id]?.[0];
+        const lastOk = lastHist?.status === 'success' || (t.last_run && !lastHist);
+        const lastFail = lastHist?.status === 'error';
+        const iconClass = lastFail ? 'fail' : (lastOk ? 'ok' : 'pending');
+        const iconChar = lastFail ? '\u2717' : (lastOk ? '\u2713' : '\u25cb');
 
-      return `<div class="task-item">
-        <div class="task-header">
-          <span class="task-icon ${iconClass}">${iconChar}</span>
-          <span class="task-name" title="${escHtml(prompt)}">${escHtml(shortPrompt)}</span>
-          <span class="task-schedule">${escHtml(schedVal)}</span>
-        </div>
-        <div class="task-meta">
-          <span>Last: <span class="${iconClass}">${lastFail ? '\u2717 ' : '\u2713 '}${escHtml(lastStatus)}</span></span>
-          <span>Next: ${t.next_run ? relativeTime(t.next_run) : '--'}</span>
-        </div>
-      </div>`;
+        const lastDur = lastHist?.duration_ms ? formatDuration(lastHist.duration_ms) : '--';
+        const lastStatus = lastFail ? 'failed' : (lastOk ? lastDur : '--');
+
+        const prompt = t.prompt || t.id || 'task';
+        const shortPrompt = truncate(prompt, 30);
+        const schedVal = t.schedule_value || '';
+        const nextTime = t.next_run ? `${formatTime(t.next_run)} (${relativeTime(t.next_run)})` : '--';
+        const lastTime = t.last_run ? formatTime(t.last_run) : '--';
+
+        return `<div class="task-item">
+          <div class="task-header">
+            <span class="task-icon ${iconClass}">${iconChar}</span>
+            <span class="task-name" title="${escHtml(prompt)}">${escHtml(shortPrompt)}</span>
+            <span class="task-schedule">${escHtml(schedVal)}</span>
+          </div>
+          <div class="task-meta">
+            <span>Last: <span class="${iconClass}">${lastFail ? '\u2717 ' : '\u2713 '}${escHtml(lastStatus)}</span> ${escHtml(lastTime)}</span>
+            <span>Next: ${escHtml(nextTime)}</span>
+          </div>
+        </div>`;
+      }).join('');
+
+      return `<div class="task-group-header" style="font-size:11px;color:var(--cyan);text-transform:uppercase;margin:8px 0 4px;padding-bottom:2px;border-bottom:1px solid var(--border)">${escHtml(groupLabel)}</div>${taskHtml}`;
     }).join('');
   };
 
@@ -786,6 +896,18 @@
 
     const html = events.map(ev => {
       if (ev.type === 'user') {
+        // Check for subagent (Task) result first
+        const taskResult = ev.toolUseResult;
+        if (taskResult && (taskResult.status || taskResult.task)) {
+          const task = taskResult.task || taskResult;
+          const status = task.status || taskResult.status || 'unknown';
+          const desc = task.description || (taskResult.prompt || '').slice(0, 80) || '';
+          const output = task.output ? truncate(task.output, 200) : '';
+          return `<div class="tx-event">
+            <div class="tx-label subagent-result">[subagent ${escHtml(status)}] ${escHtml(truncate(desc, 60))}</div>
+            ${output ? `<div class="tx-content result">${escHtml(output)}</div>` : ''}
+          </div>`;
+        }
         const text = extractText(ev.message?.content || ev.content || '');
         return `<div class="tx-event">
           <div class="tx-label user">[user]</div>
@@ -809,6 +931,14 @@
             </div>`;
           }
           if (b.type === 'tool_use') {
+            const isSubagent = b.name === 'Task';
+            if (isSubagent) {
+              const desc = b.input?.description || b.input?.prompt?.slice(0, 100) || '';
+              return `<div class="tx-event">
+                <div class="tx-label subagent">[subagent spawn] ${escHtml(desc)}</div>
+                <div class="tx-content">${escHtml(truncate(b.input?.prompt || '', 200))}</div>
+              </div>`;
+            }
             const inputStr = b.input ? Object.entries(b.input).map(([k, v]) =>
               `${k}: ${typeof v === 'string' ? truncate(v, 80) : JSON.stringify(v).slice(0, 80)}`
             ).join('\n') : '';
@@ -938,14 +1068,22 @@
     const total = containers ? containers.length : 0;
     const active = total; // docker ps only shows running containers
 
+    // Aggregate subagent counts — only for groups with running containers
+    const groups = state.groups || [];
+    const cList = containers || [];
+    const totalSubagents = groups.reduce((sum, g) => {
+      const hasContainer = cList.some(c => c.name && c.name.startsWith(`nanoclaw-${g.folder}-`));
+      return sum + (hasContainer ? (g.subagents?.active || 0) : 0);
+    }, 0);
+
     el.innerHTML = `
       <div class="stat-box">
         <div class="val">${active}</div>
         <div class="lbl">Active containers</div>
       </div>
       <div class="stat-box">
-        <div class="val">${total}</div>
-        <div class="lbl">Total containers</div>
+        <div class="val">${totalSubagents}</div>
+        <div class="lbl">Active subagents</div>
       </div>
     `;
   };
@@ -986,6 +1124,14 @@
         switch (msg.type) {
           case 'status':
             renderHeader(msg.data);
+            // Refresh containers and re-render agents on each status tick
+            api('/api/containers').then(c => {
+              state.containers = c || [];
+              if (state.groups) renderAgents(state.groups);
+            });
+            break;
+          case 'groups':
+            renderAgents(msg.data);
             break;
           case 'messages':
             renderAnalytics(msg.data);
@@ -1017,14 +1163,16 @@
   // ─── Init ───
   const init = async () => {
     // Fetch all data in parallel
-    const [statusData, groupsData, tasksData, historyData, messagesData] = await Promise.all([
+    const [statusData, groupsData, tasksData, historyData, messagesData, containersData] = await Promise.all([
       api('/api/status'),
       api('/api/groups'),
       api('/api/tasks'),
       api('/api/tasks/history?limit=50'),
       api('/api/messages/stats'),
+      api('/api/containers'),
     ]);
 
+    state.containers = containersData || [];
     renderHeader(statusData);
     renderAgents(groupsData);
     renderTasks(tasksData, historyData);

@@ -6,6 +6,7 @@ import { exec } from 'child_process';
 import { WebSocketServer, WebSocket } from 'ws';
 
 import {
+  ASSISTANT_NAME,
   DASHBOARD_PORT,
   MAX_CONCURRENT_CONTAINERS,
   STORE_DIR,
@@ -15,6 +16,8 @@ import {
   getGroupsWithActivity,
   getMessageStats,
   getRecentTaskRunLogs,
+  storeMessage,
+  storeChatMetadata,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
@@ -24,6 +27,7 @@ export interface DashboardOptions {
   channels: Channel[];
   queue: GroupQueue;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  sendMessage: (jid: string, text: string) => Promise<void>;
 }
 
 const startTime = Date.now();
@@ -180,6 +184,84 @@ function findLatestJsonl(
   }
 }
 
+/**
+ * Count active subagents for a group by scanning its latest JSONL transcript.
+ * A subagent is "active" if we see a Task tool_use without a matching completed result.
+ */
+function countActiveSubagents(
+  projectRoot: string,
+  groupName: string,
+): { active: number; total: number } {
+  const latest = findLatestJsonl(projectRoot, groupName);
+  if (!latest) return { active: 0, total: 0 };
+
+  try {
+    const content = fs.readFileSync(latest.path, 'utf8');
+    const lines = content.split('\n').filter(Boolean);
+    // Track spawned task tool_use IDs and completed ones.
+    // Reset on each new top-level user prompt so stale subagents
+    // from previous conversation turns don't leak through.
+    let spawned = new Set<string>();
+    let finished = new Set<string>();
+
+    for (const line of lines) {
+      try {
+        const ev = JSON.parse(line);
+
+        // New user prompt (not a tool result) = new conversation turn
+        if (ev.type === 'user' && !ev.toolUseResult) {
+          const msgContent = ev.message?.content;
+          // Check it's a real user message, not a tool_result
+          const isToolResult =
+            Array.isArray(msgContent) &&
+            msgContent.length > 0 &&
+            msgContent[0]?.type === 'tool_result';
+          if (!isToolResult) {
+            spawned = new Set();
+            finished = new Set();
+          }
+        }
+
+        // Task spawn: assistant message with tool_use name=Task
+        if (ev.type === 'assistant') {
+          const blocks = ev.message?.content || [];
+          if (Array.isArray(blocks)) {
+            for (const b of blocks) {
+              if (b.type === 'tool_use' && b.name === 'Task' && b.id) {
+                spawned.add(b.id);
+              }
+            }
+          }
+        }
+        // Task completion: user message with toolUseResult referencing a task
+        if (ev.type === 'user' && ev.toolUseResult) {
+          const msgContent = ev.message?.content;
+          if (Array.isArray(msgContent)) {
+            for (const c of msgContent) {
+              if (c.tool_use_id && spawned.has(c.tool_use_id)) {
+                const status =
+                  ev.toolUseResult.task?.status || ev.toolUseResult.status;
+                if (status === 'completed' || status === 'error') {
+                  finished.add(c.tool_use_id);
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        /* skip malformed lines */
+      }
+    }
+
+    return {
+      active: spawned.size - finished.size,
+      total: spawned.size,
+    };
+  } catch {
+    return { active: 0, total: 0 };
+  }
+}
+
 function sendJson(res: ServerResponse, data: unknown, status = 200) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
@@ -218,7 +300,11 @@ export function startDashboard(opts: DashboardOptions): void {
       }
 
       if (url.pathname === '/api/groups') {
-        sendJson(res, getGroupsWithActivity());
+        const groups = getGroupsWithActivity().map((g) => ({
+          ...g,
+          subagents: countActiveSubagents(projectRoot, g.folder),
+        }));
+        sendJson(res, groups);
         return;
       }
 
@@ -270,6 +356,70 @@ export function startDashboard(opts: DashboardOptions): void {
         } catch {
           sendJson(res, []);
         }
+        return;
+      }
+
+      // Send message to a group from the dashboard
+      const sendMatch = url.pathname.match(/^\/api\/groups\/([^/]+)\/send$/);
+      if (sendMatch && req.method === 'POST') {
+        const folder = decodeURIComponent(sendMatch[1]);
+        const groups = opts.registeredGroups();
+        const entry = Object.entries(groups).find(([, g]) => g.folder === folder);
+
+        if (!entry) {
+          sendJson(res, { error: 'Group not found' }, 404);
+          return;
+        }
+
+        const [chatJid] = entry;
+
+        // Read POST body
+        let body = '';
+        for await (const chunk of req) body += chunk;
+
+        let text: string;
+        try {
+          const parsed = JSON.parse(body);
+          text = parsed.text;
+        } catch {
+          sendJson(res, { error: 'Invalid JSON body' }, 400);
+          return;
+        }
+
+        if (!text || typeof text !== 'string') {
+          sendJson(res, { error: 'Missing text field' }, 400);
+          return;
+        }
+
+        // Prepend trigger so the agent processes it
+        const content = `@${ASSISTANT_NAME} ${text}`;
+        const now = new Date();
+        const msgId = `dash-${now.getTime()}`;
+
+        // Store as a real message
+        storeMessage({
+          id: msgId,
+          chat_jid: chatJid,
+          sender: 'dashboard',
+          sender_name: 'Dashboard',
+          content,
+          timestamp: now.toISOString(),
+          is_from_me: false,
+        });
+        storeChatMetadata(chatJid, now.toISOString());
+
+        // Echo to the channel so the conversation is visible there too
+        opts
+          .sendMessage(chatJid, `[Dashboard] ${text}`)
+          .catch((err) =>
+            logger.warn({ chatJid, err }, 'Failed to echo dashboard message to channel'),
+          );
+
+        // Enqueue for processing
+        opts.queue.enqueueMessageCheck(chatJid);
+
+        logger.info({ folder, chatJid }, 'Dashboard message injected');
+        sendJson(res, { ok: true, messageId: msgId });
         return;
       }
 
@@ -368,6 +518,23 @@ export function startDashboard(opts: DashboardOptions): void {
     }
   }, 2000);
 
+  // Broadcast groups with subagent counts every 5s
+  const groupsInterval = setInterval(() => {
+    if (wss.clients.size === 0) return;
+
+    const groups = getGroupsWithActivity().map((g) => ({
+      ...g,
+      subagents: countActiveSubagents(projectRoot, g.folder),
+    }));
+    const payload = JSON.stringify({ type: 'groups', data: groups });
+
+    for (const client of wss.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(payload);
+      }
+    }
+  }, 5000);
+
   // Broadcast message stats every 30s
   const messageStatsInterval = setInterval(() => {
     if (wss.clients.size === 0) return;
@@ -417,6 +584,7 @@ export function startDashboard(opts: DashboardOptions): void {
 
   process.on('beforeExit', () => {
     clearInterval(statusInterval);
+    clearInterval(groupsInterval);
     clearInterval(messageStatsInterval);
     clearInterval(taskInterval);
     wss.close();

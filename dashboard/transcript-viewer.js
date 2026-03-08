@@ -7,7 +7,7 @@
 import fs from 'fs';
 import path from 'path';
 import {
-  ESC, RESET, BOLD, DIM, GRAY, GREEN, CYAN, YELLOW,
+  ESC, RESET, BOLD, DIM, GRAY, GREEN, CYAN, YELLOW, PURPLE,
   findLatestJsonl, parseJsonlEvent, AGENT_FILE, BASE,
 } from './lib.js';
 
@@ -131,6 +131,17 @@ function render() {
         allLines.push(`${DIM}[tool_result]${RESET}`);
         for (const l of ev.lines ?? [])
           allLines.push(`${DIM}${l.slice(0, cols - 1)}${RESET}`);
+        allLines.push('');
+        break;
+      case 'subagent_spawn':
+        allLines.push(`${PURPLE}${BOLD}[subagent spawn]${RESET}`);
+        if (ev.desc) allLines.push(`  ${PURPLE}${ev.desc.slice(0, cols - 3)}${RESET}`);
+        allLines.push('');
+        break;
+      case 'subagent_result':
+        allLines.push(`${PURPLE}${BOLD}[subagent ${ev.status}]${RESET}`);
+        if (ev.desc) allLines.push(`  ${ev.desc.slice(0, cols - 3)}`);
+        if (ev.output) allLines.push(`  ${DIM}${ev.output.slice(0, cols - 3)}${RESET}`);
         allLines.push('');
         break;
     }

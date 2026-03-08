@@ -611,7 +611,15 @@ async function main(): Promise<void> {
   queue.setProcessMessagesFn(processGroupMessages);
 
   // Start web dashboard
-  startDashboard({ channels, queue, registeredGroups: () => registeredGroups });
+  startDashboard({
+    channels,
+    queue,
+    registeredGroups: () => registeredGroups,
+    sendMessage: async (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (channel) await channel.sendMessage(jid, text);
+    },
+  });
 
   recoverPendingMessages();
   startMessageLoop().catch((err) => {
