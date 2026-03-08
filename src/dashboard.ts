@@ -364,7 +364,9 @@ export function startDashboard(opts: DashboardOptions): void {
       if (sendMatch && req.method === 'POST') {
         const folder = decodeURIComponent(sendMatch[1]);
         const groups = opts.registeredGroups();
-        const entry = Object.entries(groups).find(([, g]) => g.folder === folder);
+        const entry = Object.entries(groups).find(
+          ([, g]) => g.folder === folder,
+        );
 
         if (!entry) {
           sendJson(res, { error: 'Group not found' }, 404);
@@ -412,7 +414,10 @@ export function startDashboard(opts: DashboardOptions): void {
         opts
           .sendMessage(chatJid, `[Dashboard] ${text}`)
           .catch((err) =>
-            logger.warn({ chatJid, err }, 'Failed to echo dashboard message to channel'),
+            logger.warn(
+              { chatJid, err },
+              'Failed to echo dashboard message to channel',
+            ),
           );
 
         // Enqueue for processing
